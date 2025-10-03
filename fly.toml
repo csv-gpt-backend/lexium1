@@ -1,13 +1,5 @@
-app = "lexium-api-marcelo"
+app = "<EL MISMO FLY_APP_NAME>"
 primary_region = "gru"
-
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_start_machines = true
-  auto_stop_machines = false
-  min_machines_running = 1
-
 [[mounts]]
   source = "data_vol"
   destination = "/app/storage"
