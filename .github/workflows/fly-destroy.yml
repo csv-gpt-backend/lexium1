@@ -1,0 +1,31 @@
+name: Destroy Fly App
+
+on:
+  workflow_dispatch: {}
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  FLY_ORG: ${{ secrets.FLY_ORG }}
+  APP: ${{ secrets.APP_TO_DESTROY }}
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      - name: Show app (debug)
+        run: flyctl status -a "$APP" -o "$FLY_ORG" || true
+
+      # (por si hay volúmenes atados, los eliminamos antes)
+      - name: Destroy volumes (if any)
+        run: |
+          VIDS=$(flyctl volumes list -a "$APP" --json | jq -r '.[].id' || true)
+          for V in $VIDS; do
+            echo "Destroying volume $V"
+            flyctl volumes destroy "$V" -a "$APP" --yes || true
+          done
+
+      - name: Destroy app
+        run: flyctl apps destroy "$APP" -o "$FLY_ORG" --yes
