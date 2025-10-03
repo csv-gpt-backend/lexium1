@@ -21,7 +21,7 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@v1
 
-      - name: Create app (idempotent)
+      - name: Create app (idempotent, in org)
         run: flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
 
       - name: Create volume (idempotent)
@@ -32,3 +32,12 @@ jobs:
 
       - name: Deploy
         run: flyctl deploy -a "$FLY_APP_NAME" --remote-only
+
+      - name: List apps in org (debug)
+        run: flyctl apps list -o "$FLY_ORG" || true
+
+      - name: Show app info (hostname)
+        run: flyctl info -a "$FLY_APP_NAME" || true
+
+      - name: Status (debug)
+        run: flyctl status -a "$FLY_APP_NAME" || true
