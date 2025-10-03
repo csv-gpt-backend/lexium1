@@ -1,0 +1,40 @@
+name: Deploy to Fly
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
+  FLY_REGION: ${{ secrets.FLY_REGION }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      - name: Ensure app exists
+        run: |
+          flyctl apps create "$FLY_APP_NAME" || true
+
+      - name: Ensure volume exists
+        run: |
+          flyctl volumes list -a "$FLY_APP_NAME" | grep -q data_vol || \
+          flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME"
+
+      - name: Set secrets
+        run: |
+          flyctl secrets set -a "$FLY_APP_NAME" \
+            OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}' \
+            ADMIN_TOKEN='${{ secrets.ADMIN_TOKEN }}' \
+            --stage
+
+      - name: Deploy
+        run: |
+          flyctl deploy -a "$FLY_APP_NAME" --remote-only
