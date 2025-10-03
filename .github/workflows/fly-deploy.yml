@@ -36,7 +36,7 @@ jobs:
             echo "Volume data_vol already exists"
           else
             echo "Creating volume data_vol in $FLY_REGION"
-            flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME"
+flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME" --yes
           fi
 
       - name: Show volumes (debug)
