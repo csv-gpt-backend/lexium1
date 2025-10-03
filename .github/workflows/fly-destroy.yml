@@ -5,7 +5,6 @@ on:
 
 env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-  FLY_ORG: ${{ secrets.FLY_ORG }}
   APP: ${{ secrets.APP_TO_DESTROY }}
 
 jobs:
@@ -15,17 +14,35 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@v1
 
-      - name: Show app (debug)
-        run: flyctl status -a "$APP" -o "$FLY_ORG" || true
+      - name: Install jq (for JSON parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      # (por si hay volúmenes atados, los eliminamos antes)
+      - name: Who am I (debug)
+        run: flyctl auth whoami || true
+
+      - name: Show target app
+        run: echo "APP=$APP"
+
+      # Detener y eliminar máquinas (para liberar cómputo)
+      - name: Stop & destroy machines (if any)
+        run: |
+          MIDS=$(flyctl machines list -a "$APP" --json | jq -r '.[].id' || true)
+          for id in $MIDS; do
+            echo "Stopping machine $id"
+            flyctl machine stop "$id" -a "$APP" --yes || true
+            echo "Destroying machine $id"
+            flyctl machine destroy "$id" -a "$APP" --yes || true
+          done
+
+      # Eliminar volúmenes (para no pagar storage)
       - name: Destroy volumes (if any)
         run: |
           VIDS=$(flyctl volumes list -a "$APP" --json | jq -r '.[].id' || true)
-          for V in $VIDS; do
-            echo "Destroying volume $V"
-            flyctl volumes destroy "$V" -a "$APP" --yes || true
+          for v in $VIDS; do
+            echo "Destroying volume $v"
+            flyctl volumes destroy "$v" -a "$APP" --yes || true
           done
 
+      # Destruir la app (SIN -o)
       - name: Destroy app
-        run: flyctl apps destroy "$APP" -o "$FLY_ORG" --yes
+        run: flyctl apps destroy "$APP" --yes
