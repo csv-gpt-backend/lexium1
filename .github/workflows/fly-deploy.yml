@@ -8,6 +8,7 @@ env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
   FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
   FLY_REGION: ${{ secrets.FLY_REGION }}
+  FLY_ORG: ${{ secrets.FLY_ORG }}
 
 jobs:
   deploy:
@@ -19,15 +20,18 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@v1
 
-      - name: Ensure app exists
+      # Crea la app EN LA ORG correcta (idempotente)
+      - name: Ensure app exists (org)
         run: |
-          flyctl apps create "$FLY_APP_NAME" || true
+          flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
 
+      # Crea el volumen (si no existe)
       - name: Ensure volume exists
         run: |
           flyctl volumes list -a "$FLY_APP_NAME" | grep -q data_vol || \
           flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME"
 
+      # Define secrets en la app (repetible)
       - name: Set secrets
         run: |
           flyctl secrets set -a "$FLY_APP_NAME" \
@@ -35,6 +39,7 @@ jobs:
             ADMIN_TOKEN='${{ secrets.ADMIN_TOKEN }}' \
             --stage
 
+      # Despliegue (usa tu Dockerfile de la raíz)
       - name: Deploy
         run: |
           flyctl deploy -a "$FLY_APP_NAME" --remote-only
