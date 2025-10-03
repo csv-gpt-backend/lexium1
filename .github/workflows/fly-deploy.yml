@@ -20,26 +20,46 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@v1
 
-      # Crea la app EN LA ORG correcta (idempotente)
+      # (DEBUG) Ver owner/org actuales
+      - name: Debug whoami
+        run: |
+          flyctl auth whoami || true
+
+      # Crea la app en la ORG correcta (idempotente)
       - name: Ensure app exists (org)
         run: |
           flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
 
-      # Crea el volumen (si no existe)
+      # (DEBUG) Lista apps en la ORG para ver el nombre real
+      - name: List apps in org
+        run: |
+          flyctl apps list -o "$FLY_ORG" || true
+
+      # Crea volumen persistente si no existe
       - name: Ensure volume exists
         run: |
           flyctl volumes list -a "$FLY_APP_NAME" | grep -q data_vol || \
           flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME"
 
-      # Define secrets en la app (repetible)
-      - name: Set secrets
+      # Define secrets de la app (repetible)
+      - name: Set app secrets
         run: |
           flyctl secrets set -a "$FLY_APP_NAME" \
             OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}' \
             ADMIN_TOKEN='${{ secrets.ADMIN_TOKEN }}' \
             --stage
 
-      # Despliegue (usa tu Dockerfile de la raíz)
+      # Despliegue usando Dockerfile de la raíz
       - name: Deploy
         run: |
           flyctl deploy -a "$FLY_APP_NAME" --remote-only
+
+      # (DEBUG) Muestra info con hostname exacto
+      - name: Show app info
+        run: |
+          flyctl info -a "$FLY_APP_NAME" || true
+
+      # (DEBUG) Estado/máquinas
+      - name: Status
+        run: |
+          flyctl status -a "$FLY_APP_NAME" || true
