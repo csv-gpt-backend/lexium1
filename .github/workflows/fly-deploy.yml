@@ -1,6 +1,7 @@
-name: Deploy to Fly (force volume + mount)
+name: Deploy to Fly
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
 
@@ -20,66 +21,14 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@v1
 
-      - name: Who am I (debug)
-        run: flyctl auth whoami || true
-
-      - name: Ensure app exists in ORG
+      - name: Create app (idempotent)
         run: flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
 
-      - name: Show app info (pre)
-        run: flyctl info -a "$FLY_APP_NAME" || true
+      - name: Create volume (idempotent)
+        run: flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME" --yes || true
 
-      - name: Ensure volume exists (create if missing)
-        run: |
-          set -e
-          if flyctl volumes list -a "$FLY_APP_NAME" | grep -q "data_vol"; then
-            echo "Volume data_vol already exists"
-          else
-            echo "Creating volume data_vol in $FLY_REGION"
-flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME" --yes
-          fi
+      - name: Set secrets
+        run: flyctl secrets set -a "$FLY_APP_NAME" OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" ADMIN_TOKEN="${{ secrets.ADMIN_TOKEN }}" --stage
 
-      - name: Show volumes (debug)
-        run: flyctl volumes list -a "$FLY_APP_NAME" || true
-
-      - name: Set app secrets
-        run: |
-          flyctl secrets set -a "$FLY_APP_NAME" \
-            OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}' \
-            ADMIN_TOKEN='${{ secrets.ADMIN_TOKEN }}' \
-            --stage
-
-      # Despliegue normal: debería crear/actualizar la machine y montar según fly.toml
       - name: Deploy
         run: flyctl deploy -a "$FLY_APP_NAME" --remote-only
-
-      - name: List machines (debug)
-        run: flyctl machines list -a "$FLY_APP_NAME" || true
-
-      # Si la machine existe pero no tiene el mount, lo forzamos
-      - name: Ensure mount attached to machine
-        shell: bash
-        run: |
-          set -e
-          MID=$(flyctl machines list -a "$FLY_APP_NAME" --json | jq -r '.[0].id // empty')
-          if [ -z "$MID" ]; then
-            echo "No machine found yet (deploy may be starting)."
-          else
-            echo "Machine ID: $MID"
-            # Ver si ya está montado
-            HAS_MOUNT=$(flyctl machines list -a "$FLY_APP_NAME" --json | jq -r '.[0].config.mounts | map(select(.volume=="data_vol" and .path=="/app/storage")) | length')
-            if [ "$HAS_MOUNT" = "0" ]; then
-              echo "Attaching mount data_vol:/app/storage to $MID"
-              flyctl machine update "$MID" -a "$FLY_APP_NAME" --mounts name=data_vol:/app/storage
-              echo "Restarting machine to apply mount"
-              flyctl machine restart "$MID" -a "$FLY_APP_NAME"
-            else
-              echo "Mount already present."
-            fi
-          fi
-
-      - name: Show app info (post)
-        run: flyctl info -a "$FLY_APP_NAME" || true
-
-      - name: Status (debug)
-        run: flyctl status -a "$FLY_APP_NAME" || true
