@@ -41,3 +41,14 @@ jobs:
 
       - name: Status (debug)
         run: flyctl status -a "$FLY_APP_NAME" || true
+
+              - name: Print hostname (copy/paste this)
+        run: echo "https://${FLY_APP_NAME}.fly.dev"
+
+      - name: Check DNS for hostname
+        run: |
+          H="${FLY_APP_NAME}.fly.dev"
+          echo "Checking DNS for $H"
+          getent hosts "$H" || echo "DNS not found yet (propagation or app name mismatch)"
+          echo "Open this in your browser: https://$H/api/ping"
+
