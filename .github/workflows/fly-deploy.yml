@@ -42,7 +42,7 @@ jobs:
       - name: Status (debug)
         run: flyctl status -a "$FLY_APP_NAME" || true
 
-              - name: Print hostname (copy/paste this)
+      - name: Print hostname (copy/paste this)
         run: echo "https://${FLY_APP_NAME}.fly.dev"
 
       - name: Check DNS for hostname
