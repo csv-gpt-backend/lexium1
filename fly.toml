@@ -1,4 +1,4 @@
-app = "lexium-api-marcelo-20251003x"   # <-- tu NUEVO nombre
+app = "lexium-api-marcelo-20251003x"
 primary_region = "gru"
 
 [http_service]
@@ -11,3 +11,9 @@ primary_region = "gru"
 [[mounts]]
   source = "data_vol"
   destination = "/app/storage"
+
+[env]
+  ADMIN_TOKEN = "lexium123"     # solo para el demo
+  CORS_ORIGINS = "*"            # para probar desde cualquier origen
+  # (opcional, solo si quieres probar /api/answer sin secrets)
+  # OPENAI_API_KEY = "sk-xxxxxxxx"
