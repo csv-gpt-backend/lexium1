@@ -1,4 +1,4 @@
-app = "lexium-api-marcelo-20251003a"
+app = "lexium-api-marcelo-20251003x"   # <-- tu NUEVO nombre
 primary_region = "gru"
 
 [http_service]
