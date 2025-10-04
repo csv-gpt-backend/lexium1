@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Subir TXT/CSV a Fly</title>
+<style>
+body{font:16px system-ui;margin:20px;color:#111}
+.card{max-width:720px;margin:auto;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 6px 18px #0001;padding:16px}
+label{display:block;margin:10px 0 6px}
+input,button{padding:10px;border:1px solid #e5e7eb;border-radius:10px}
+button{background:#6d28d9;color:#fff;cursor:pointer}
+pre{background:#f8fafc;padding:12px;border-radius:10px;overflow:auto}
+</style>
+<div class="card">
+  <h2>Subir TXT/CSV a Fly</h2>
+  <label>ADMIN_TOKEN</label>
+  <input id="tok" value="lexium123" style="width:100%">
+  <label>Archivos (.txt, .csv)</label>
+  <input id="files" type="file" multiple accept=".txt,.csv">
+  <div style="margin-top:12px;display:flex;gap:10px">
+    <button id="btnUp">Subir</button>
+    <button id="btnList" type="button">Ver lista</button>
+  </div>
+  <pre id="out" style="margin-top:12px"></pre>
+</div>
+<script>
+const $ = s => document.querySelector(s), out = $("#out");
+async function upload(){
+  const tok=$("#tok").value.trim(); const files=[...$("#files").files];
+  if(!tok){ out.textContent="Falta ADMIN_TOKEN"; return; }
+  if(!files.length){ out.textContent="Selecciona al menos un archivo"; return; }
+  const fd=new FormData(); for(const f of files) fd.append("files", f);
+  out.textContent="Subiendo...";
+  const r=await fetch(`/api/files/upload`,{ method:"POST", headers:{ "x-admin-token": tok }, body:fd }).catch(e=>({status:0,statusText:String(e)}));
+  let j; try{ j=await r.json(); }catch{ j={}; }
+  out.textContent=`HTTP ${r.status}\n`+JSON.stringify(j,null,2);
+}
+async function list(){
+  const tok=$("#tok").value.trim();
+  const r=await fetch(`/api/files`,{ headers:{ "x-admin-token": tok }}).catch(e=>({status:0,statusText:String(e)}));
+  let j; try{ j=await r.json(); }catch{ j={}; }
+  out.textContent=`HTTP ${r.status}\n`+JSON.stringify(j,null,2);
+}
+$("#btnUp").onclick=e=>{e.preventDefault();upload();};
+$("#btnList").onclick=e=>{e.preventDefault();list();};
+</script>
