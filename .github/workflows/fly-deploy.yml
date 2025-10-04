@@ -1,54 +1,31 @@
 name: Deploy to Fly
-
 on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-
+  push: { branches: [ "main" ] }
+  workflow_dispatch: {}
 env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
   FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
-  FLY_REGION: ${{ secrets.FLY_REGION }}
   FLY_ORG: ${{ secrets.FLY_ORG }}
-
+  FLY_REGION: ${{ secrets.FLY_REGION }}
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@v1
-
-      - name: Create app (idempotent, in org)
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - name: Ensure app
         run: flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
-
-      - name: Create volume (idempotent)
+      - name: Ensure volume
         run: flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME" --yes || true
-
-      - name: Set secrets
-        run: flyctl secrets set -a "$FLY_APP_NAME" OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" ADMIN_TOKEN="${{ secrets.ADMIN_TOKEN }}" --stage
-
       - name: Deploy
         run: flyctl deploy -a "$FLY_APP_NAME" --remote-only
-
-      - name: List apps in org (debug)
-        run: flyctl apps list -o "$FLY_ORG" || true
-
-      - name: Show app info (hostname)
-        run: flyctl info -a "$FLY_APP_NAME" || true
-
-      - name: Status (debug)
-        run: flyctl status -a "$FLY_APP_NAME" || true
-
-      - name: Print hostname (copy/paste this)
-        run: echo "https://${FLY_APP_NAME}.fly.dev"
-
-      - name: Check DNS for hostname
+      - name: Status / machines / checks
         run: |
-          H="${FLY_APP_NAME}.fly.dev"
-          echo "Checking DNS for $H"
-          getent hosts "$H" || echo "DNS not found yet (propagation or app name mismatch)"
-          echo "Open this in your browser: https://$H/api/ping"
-
+          flyctl status -a "$FLY_APP_NAME" || true
+          flyctl machines list -a "$FLY_APP_NAME" || true
+          flyctl checks list -a "$FLY_APP_NAME" || true
+      - name: Print URLs
+        run: |
+          echo "URL:    https://${FLY_APP_NAME}.fly.dev"
+          echo "Health: https://${FLY_APP_NAME}.fly.dev/api/ping"
+          echo "Files:  https://${FLY_APP_NAME}.fly.dev/api/files"
