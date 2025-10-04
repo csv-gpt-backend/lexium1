@@ -16,4 +16,4 @@ primary_region = "gru"
   ADMIN_TOKEN = "lexium123"     # solo para el demo
   CORS_ORIGINS = "*"            # para probar desde cualquier origen
   # (opcional, solo si quieres probar /api/answer sin secrets)
-  # OPENAI_API_KEY = "sk-xxxxxxxx"
+   OPENAI_API_KEY = "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"
