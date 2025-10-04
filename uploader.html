@@ -1,0 +1,27 @@
+<!doctype html><meta charset="utf-8"><title>Subir a Fly</title>
+<style>body{font:16px system-ui;margin:20px}label{display:block;margin:10px 0 6px}input,button{padding:10px}</style>
+<h2>Subir TXT/CSV a Fly</h2>
+<label>API_BASE</label>
+<input id="api" value="https://lexium-api-marcelo-20251003x.fly.dev" style="width:100%">
+<label>ADMIN_TOKEN</label>
+<input id="tok" value="lexium123" style="width:100%">
+<label>Archivos</label>
+<input id="files" type="file" multiple accept=".txt,.csv">
+<p><button id="up">Subir</button> <button id="ls">Ver lista</button></p>
+<pre id="out"></pre>
+<script>
+const $=s=>document.querySelector(s),out=$("#out");
+async function up(){
+  const API=$("#api").value.replace(/\/$/,''); const tok=$("#tok").value; const fs=[...$("#files").files];
+  if(!fs.length){out.textContent="Selecciona al menos un archivo";return;}
+  const fd=new FormData(); fs.forEach(f=>fd.append("files",f));
+  const r=await fetch(`${API}/api/files/upload`,{method:"POST",headers:{ "x-admin-token":tok },body:fd});
+  out.textContent=`HTTP ${r.status}\n`+JSON.stringify(await r.json(),null,2);
+}
+async function ls(){
+  const API=$("#api").value.replace(/\/$/,''); const tok=$("#tok").value;
+  const r=await fetch(`${API}/api/files`,{headers:{ "x-admin-token":tok }});
+  out.textContent=`HTTP ${r.status}\n`+JSON.stringify(await r.json(),null,2);
+}
+$("#up").onclick=e=>{e.preventDefault();up();}; $("#ls").onclick=e=>{e.preventDefault();ls();};
+</script>
