@@ -2,9 +2,7 @@
   "name": "lexium-api",
   "private": true,
   "type": "commonjs",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "cors": "^2.8.5",
     "csv-parse": "^5.5.0",
