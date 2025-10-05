@@ -3,14 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>FFFFFFTTTTuuuDDDAsistente Lexium</title>
+<title>Asistente Lexium</title>
 <style>
-  :root{
-    --bg:#fff; --fg:#111; --muted:#6b7280; --pri:#0d6efd; --bd:#e5e7eb;
-  }
-  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+  :root{ --bg:#fff; --fg:#111; --muted:#6b7280; --pri:#0d6efd; --bd:#e5e7eb; }
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
   .wrap{max-width:1180px;margin:0 auto;padding:12px;}
-  /* fila superior fija (65% alto) */
   .hero{position:sticky;top:0;background:#fff;z-index:5;padding-top:4px;}
   .heroGrid{display:grid;grid-template-columns:1fr 3fr 1fr;align-items:center;gap:8px;}
   .sideImg{display:flex;justify-content:center}
@@ -29,17 +26,18 @@
   th,td{border:1px solid var(--bd);padding:8px}
   th{background:#f8fafc;text-align:left}
   .muted{color:var(--muted);font-size:.9rem}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:10px 0}
+  .chip{border:1px solid var(--bd);padding:6px 10px;border-radius:999px;cursor:pointer;background:#fff}
+  .chip:hover{background:#f5f7fb}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <!-- botón Historial (arriba derecha) -->
   <div class="hist">
     <button id="btnHist" title="Ver sesiones guardadas">Historial</button>
   </div>
 
-  <!-- Bloque superior fijo -->
   <div class="hero" aria-label="cabecera">
     <div class="heroGrid">
       <div class="sideImg">
@@ -53,9 +51,8 @@
       </div>
     </div>
 
-    <!-- Caja de texto + barra de acciones -->
     <div style="margin:8px 0">
-      <textarea id="q" class="query" rows="2" placeholder="Escribe tu pregunta (ej: explica la asertividad según evaluacion.txt, o promedio de AUTOESTIMA por paralelo)"></textarea>
+      <textarea id="q" class="query" rows="2" placeholder="Escribe tu pregunta (ej.: reporte completo de Castillo D Julia; top 5 con AUTOESTIMA más baja; promedio de ASERTIVIDAD por PARALELO)"></textarea>
     </div>
 
     <div class="toolbar">
@@ -72,9 +69,11 @@
         <option value="doc">DOC</option>
       </select>
     </div>
+
+    <!-- chips de ejemplo -->
+    <div class="chips" id="chips"></div>
   </div>
 
-  <!-- Resultado -->
   <div id="out" class="out" aria-live="polite"></div>
   <div class="muted">La respuesta se genera estrictamente usando el CSV y los TXT cargados en tu backend.</div>
 
@@ -82,13 +81,10 @@
 
 <script>
 /* ====== CONFIG ====== */
-/*const API_BASE = "https://lexium-api-383217514425.southamerica-west1.run.app"; // ← pon tu URL*/
-/*const ANSWER_PATH = "/api/answer";*/
+const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev"; // ← TU URL DE FLY
+const PATH_ANSWER = "/api/answer";
+const PATH_REPORT = "/api/report";
 
-const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev";
-/*const ANSWER_PATH = "/api/answer";*/
-const ANSWER_PATH = "/api/report";
-  
 /* ====== UI refs ====== */
 const q = document.getElementById("q");
 const out = document.getElementById("out");
@@ -102,7 +98,7 @@ const btnClear = document.getElementById("btnClear");
 const selExport = document.getElementById("selExport");
 const btnHist = document.getElementById("btnHist");
 
-/* ====== Estado de voz/video ====== */
+/* ====== Estado voz/video ====== */
 let voices = [];
 let currentVoice = null;
 let speaking = false;
@@ -111,11 +107,9 @@ let lastSpokenText = "";
 let resumeIndex = 0;
 let recognizer = null;
 
-/* ====== Voz: elegir femenina español ====== */
 function pickSpanishFemale(){
   voices = window.speechSynthesis.getVoices();
   const es = voices.filter(v=>/^es(-|_)/i.test(v.lang));
-  // intenta opciones femeninas por nombre
   let fem = es.find(v=>/female|femenina|mujer/i.test(v.name));
   currentVoice = fem || es[0] || voices[0] || null;
 }
@@ -124,12 +118,10 @@ if (typeof speechSynthesis !== "undefined") {
   window.speechSynthesis.onvoiceschanged = pickSpanishFemale;
 }
 
-/* ====== Hablar con reanudación ====== */
 function speak(text, fromIndex=0){
   if (!text) return;
   lastSpokenText = text;
   resumeIndex = fromIndex;
-
   const chunk = text.slice(fromIndex);
   const u = new SpeechSynthesisUtterance(chunk);
   if (currentVoice) u.voice = currentVoice;
@@ -140,74 +132,52 @@ function speak(text, fromIndex=0){
   u.onerror = ()=>{ speaking = false; vid.pause(); };
   window.speechSynthesis.speak(u);
 }
-
-/* Pausar/Reanudar (continúa desde el punto) */
 function toggleAV(){
-  if (speaking && !paused){
-    window.speechSynthesis.pause();
-    paused = true;
-    vid.pause();
-  } else if (speaking && paused){
-    window.speechSynthesis.resume();
-    paused = false;
-    vid.play().catch(()=>{});
-  } else {
-    // si no está hablando, relanza desde donde quedó
-    speak(lastSpokenText, resumeIndex);
-  }
+  if (speaking && !paused){ window.speechSynthesis.pause(); paused = true; vid.pause(); }
+  else if (speaking && paused){ window.speechSynthesis.resume(); paused = false; vid.play().catch(()=>{}); }
+  else { speak(lastSpokenText, resumeIndex); }
 }
-
-/* Reproducir de nuevo desde el principio */
-function replay(){
-  if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-  speak(lastSpokenText, 0);
-}
+function replay(){ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); speak(lastSpokenText, 0); }
 
 /* ====== Render ====== */
 function renderAnswer(data){
-  // data = { general, lists[], tables[] }
   let html = "";
-  if (data.general) {
-    html += `<p>${data.general.replace(/\n/g,"<br>")}</p>`;
-  }
+  if (data.general) { html += `<p>${escapeHtml(data.general).replace(/\n/g,"<br>")}</p>`; }
   (data.lists||[]).forEach(l=>{
-    html += `<h3>${l.title||"Lista"}</h3><ol>`;
-    (l.items||[]).forEach(it=> html += `<li>${it}</li>`);
+    html += `<h3>${escapeHtml(l.title||"Lista")}</h3><ol>`;
+    (l.items||[]).forEach(it=> html += `<li>${escapeHtml(it)}</li>`);
     html += `</ol>`;
   });
   (data.tables||[]).forEach(t=>{
     const cols = t.columns||[];
     const rows = t.rows||[];
-    html += `<h3>${t.title||"Tabla"}</h3><table><thead><tr>`;
-    cols.forEach(c=> html+=`<th>${c}</th>`);
+    html += `<h3>${escapeHtml(t.title||"Tabla")}</h3><table><thead><tr>`;
+    cols.forEach(c=> html+=`<th>${escapeHtml(String(c))}</th>`);
     html += `</tr></thead><tbody>`;
     rows.forEach(r=>{
-      html += `<tr>${r.map(x=>`<td>${x}</td>`).join("")}</tr>`;
+      html += `<tr>${r.map(x=>`<td>${escapeHtml(String(x))}</td>`).join("")}</tr>`;
     });
     html += `</tbody></table>`;
   });
   out.innerHTML = html || "<em>Sin contenido.</em>";
-
-  // voz: lee TODO el general; si hay tablas grandes no se leen completas para no eternizar.
-  if (data.general) {
-    if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-    speak(data.general, 0);
-  }
+  if (data.general) { if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); speak(data.general, 0); }
 }
+function escapeHtml(x){return x.replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
 
-/* ====== Enviar a backend ====== */
+/* ====== Ask ====== */
 async function ask(){
   const text = q.value.trim();
   if (!text) return;
+  out.innerHTML = "…consultando…";
+  const useReport = /reporte\s+completo\s+de\s+/i.test(text);
+  const url = `${API_BASE}${useReport?PATH_REPORT:PATH_ANSWER}?q=${encodeURIComponent(text)}&t=${Date.now()}`;
   try{
-    const url = `${API_BASE}${ANSWER_PATH}?q=${encodeURIComponent(text)}`;
-    const r = await fetch(url, { headers:{Accept:"application/json"} });
+    const r = await fetch(url, { headers:{Accept:"application/json"}, cache: "no-store" });
     const data = await r.json();
     if (!r.ok || !data.ok) {
       out.innerHTML = `<pre style="color:#b91c1c">${(data && (data.error||data.general)) || r.statusText}</pre>`;
       return;
     }
-    // guarda sesión
     saveSession(text, data);
     renderAnswer(data);
   }catch(e){
@@ -233,7 +203,7 @@ function toggleDict(){
   else { recognizer.start(); recognizer.listening=true; btnDict.textContent="⏹ Detener dictado"; }
 }
 
-/* ====== Sesiones (historial localStorage) ====== */
+/* ====== Historial local ====== */
 function saveSession(question, data){
   const key = "lexium_sessions";
   const all = JSON.parse(localStorage.getItem(key) || "[]");
@@ -252,24 +222,22 @@ function openHistory(){
   <h2>Sesiones</h2>
   ${all.map(s=>`
     <details>
-      <summary><b>${s.id}</b> — ${s.question}</summary>
+      <summary><b>${s.id}</b> — ${escapeHtml(s.question)}</summary>
       <pre>${escapeHtml(JSON.stringify(s.data, null, 2))}</pre>
     </details>
   `).join("")}
   </body></html>`;
   w.document.write(html); w.document.close();
 }
-function escapeHtml(x){return x.replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
 
-/* ====== Exportar ====== */
+/* ====== Export ====== */
 selExport.addEventListener("change", ()=>{
   const v = selExport.value; selExport.value="";
   if (!out.innerHTML.trim()){ alert("No hay contenido que exportar."); return; }
-  if (v==="pdf"){ // vista previa
+  if (v==="pdf"){
     const w = window.open("","_blank");
     w.document.write(`<html><head><title>Export PDF</title></head><body>${out.innerHTML}</body></html>`);
-    w.document.close();
-    w.focus(); w.print();
+    w.document.close(); w.focus(); w.print();
   } else if (v==="xls" || v==="doc"){
     const mime = v==="xls" ? "application/vnd.ms-excel" : "application/msword";
     const blob = new Blob([`<html><body>${out.innerHTML}</body></html>`], {type:mime});
@@ -281,25 +249,31 @@ selExport.addEventListener("change", ()=>{
   }
 });
 
-/* ====== Limpieza / Nueva sesión ====== */
-btnClear.addEventListener("click", ()=>{
-  q.value=""; out.innerHTML=""; if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-});
-btnNew.addEventListener("click", ()=>{
-  if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-  q.value=""; out.innerHTML="";
-});
-
 /* ====== Eventos ====== */
 btnSend.addEventListener("click", ask);
 btnDict.addEventListener("click", toggleDict);
 btnToggleAV.addEventListener("click", toggleAV);
 btnReplay.addEventListener("click", replay);
 btnHist.addEventListener("click", openHistory);
-
-/* ====== UX ====== */
+btnClear.addEventListener("click", ()=>{ q.value=""; out.innerHTML=""; if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); });
+btnNew.addEventListener("click", ()=>{ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); q.value=""; out.innerHTML=""; });
 q.addEventListener("keydown", e=>{ if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) ask(); });
 
+/* ====== Chips de ejemplo ====== */
+const examples = [
+  "reporte completo de Castillo D Julia",
+  "top 5 estudiantes con AUTOESTIMA más baja según decimo.csv",
+  "promedio de ASERTIVIDAD por PARALELO según decimo.csv",
+  "muestra 5 filas de decimo.csv",
+  "explica la ASERTIVIDAD según emocionales.txt"
+];
+const chips = document.getElementById("chips");
+examples.forEach(txt=>{
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = txt;
+  b.onclick = ()=>{ q.value = txt; ask(); };
+  chips.appendChild(b);
+});
 </script>
 </body>
 </html>
