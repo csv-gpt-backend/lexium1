@@ -1,4 +1,6 @@
-// server.js
+// server.js (ESM)
+// API Lexium: archivos, CSV, consultas naturales y reportes.
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -6,13 +8,13 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// ===== Paths & Config =====
+/* ================== Paths & Config ================== */
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname  = path.dirname(__filename);
 
-const PORT = process.env.PORT || 8080;
-const STORAGE_DIR = process.env.STORAGE_DIR || "/app/storage";
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "lexium123";
+const PORT         = process.env.PORT || 8080;
+const STORAGE_DIR  = process.env.STORAGE_DIR || "/app/storage";
+const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || "lexium123";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "*")
   .split(",")
   .map(s => s.trim())
@@ -23,7 +25,7 @@ await fs.mkdir(STORAGE_DIR, { recursive: true });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// no-cache (stateless)
+// No cache
 app.use((req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   res.set("Pragma", "no-cache");
@@ -31,10 +33,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== CORS robusto (soporta https://*.vercel.app) =====
+/* ================== CORS (soporta comodines) ================== */
 function originMatches(origin, pattern) {
   if (pattern === "*") return true;
-  // convierte patrón con * a regex
   const esc = s => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
   const rx = new RegExp("^" + esc(pattern).replace(/\\\*/g, ".*") + "$");
   return rx.test(origin);
@@ -42,14 +43,14 @@ function originMatches(origin, pattern) {
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // cURL, Postman
-      const ok = CORS_ORIGINS.some(pat => originMatches(origin, pat));
+      if (!origin) return cb(null, true); // cURL/Postman
+      const ok = CORS_ORIGINS.some(p => originMatches(origin, p));
       cb(null, ok);
     },
   })
 );
 
-// ===== Helpers =====
+/* ================== Helpers base ================== */
 const upload = multer({ storage: multer.memoryStorage() });
 
 function norm(s = "") {
@@ -57,7 +58,8 @@ function norm(s = "") {
     .toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^\w\s]/g, " ")
-    .replace(/\s+/g, " ").trim();
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function toNum(x) {
   if (x === null || x === undefined) return NaN;
@@ -86,17 +88,21 @@ function by(arr, key) {
   return m;
 }
 
-// ===== CSV loader (auto ; o ,) =====
+/* ================== CSV & TXT ================== */
 async function loadCSV(filename) {
   const full = path.join(STORAGE_DIR, filename);
   const raw = await fs.readFile(full, "utf8");
-  const lines = raw.replace(/\r/g,"").split("\n").filter(l => l.trim().length).map(l => l.replace(/\uFEFF/g,""));
+  const lines = raw
+    .replace(/\r/g,"")
+    .split("\n")
+    .filter(l => l.trim().length)
+    .map(l => l.replace(/\uFEFF/g,""));
   if (!lines.length) return { columns: [], rows: [], delimiter: "," };
 
   const first = lines[0];
   const delimiter = (first.split(";").length > first.split(",").length) ? ";" : ",";
-
   const headers = first.split(delimiter).map(h => h.trim());
+
   const rows = lines.slice(1).map(l => {
     const parts = l.split(delimiter).map(s => s.replace(/^"(.*)"$/,"$1").trim());
     const obj = {};
@@ -104,7 +110,7 @@ async function loadCSV(filename) {
     return obj;
   });
 
-  // castea columnas numéricas si aplica
+  // Casteo numérico heurístico
   for (const key of headers) {
     const sample = rows.slice(0, 25).map(r => toNum(r[key])).filter(Number.isFinite);
     if (sample.length >= 3) {
@@ -114,36 +120,40 @@ async function loadCSV(filename) {
       }
     }
   }
+
   return { columns: headers, rows, delimiter };
 }
 
-// ===== TXT =====
 async function readText(name) {
   const p = path.join(STORAGE_DIR, name);
   try { return await fs.readFile(p, "utf8"); }
   catch { return ""; }
 }
 
-// ===== Nombre tolerante =====
+/* ================== Búsqueda por nombre ================== */
 function tokenizeName(s) { return norm(s).split(/\s+/).filter(Boolean); }
 function findBestStudent(rows, query) {
   const qn = norm(query);
-  const exact = rows.find(r => norm(r.NOMBRE) === qn);
+  const nameKey = rows.length ? Object.keys(rows[0]).find(h=>norm(h)==="nombre") || "NOMBRE" : "NOMBRE";
+
+  const exact = rows.find(r => norm(r[nameKey]) === qn);
   if (exact) return { student: exact, suggestions: [] };
+
   const qTok = tokenizeName(qn);
   const scored = rows.map(r => {
-    const nTok = tokenizeName(r.NOMBRE);
+    const nTok = tokenizeName(r[nameKey] ?? "");
     const hits = qTok.reduce((acc, qt) => acc + (nTok.includes(qt) ? 1 : 0), 0);
     return { r, hits };
   }).filter(x => x.hits > 0);
-  scored.sort((a,b)=> b.hits - a.hits || norm(a.r.NOMBRE).length - norm(b.r.NOMBRE).length);
+  scored.sort((a,b)=> b.hits - a.hits || norm(a.r[nameKey]).length - norm(b.r[nameKey]).length);
+
   if (scored.length && scored[0].hits >= Math.min(qTok.length, 2)) {
-    return { student: scored[0].r, suggestions: scored.slice(1,6).map(x=>x.r.NOMBRE) };
+    return { student: scored[0].r, suggestions: scored.slice(1,6).map(x=>x.r[nameKey]) };
   }
-  return { student: null, suggestions: scored.slice(0,10).map(x=>x.r.NOMBRE) };
+  return { student: null, suggestions: scored.slice(0,10).map(x=>x.r[nameKey]) };
 }
 
-// ===== Admin guard =====
+/* ================== Guard de Admin ================== */
 function isAdmin(req){ return req.headers["x-admin-token"] === ADMIN_TOKEN; }
 function requireAdmin(req, res, next){
   if (!ADMIN_TOKEN) return res.status(500).json({ ok:false, error:"admin_token_not_set" });
@@ -151,7 +161,177 @@ function requireAdmin(req, res, next){
   next();
 }
 
-// ===== API =====
+/* ================== Helpers extra (intents) ================== */
+function has(nq, ...tokens){ return tokens.some(t => nq.includes(norm(t))); }
+
+function pickMeasure(nq, columns){
+  const direct = columns.find(h => nq.includes(norm(h)));
+  if (direct) return direct;
+
+  const map = [
+    { syns:["ie","ie global","inteligencia emocional","promedio de inteligencia emocional"], col:"PROMEDIO DE INTELIGENCIA EMOCIONAL" },
+    { syns:["intrapersonales"], col:"PROMEDIO DE HABILIDADES INTRAPERSONALES" },
+    { syns:["interpersonales"], col:"PROMEDIO DE HABILIDADES INTERPERSONALES" },
+    { syns:["vida"], col:"PROMEDIO DE HABILIDADES PARA LA VIDA" },
+  ];
+  for (const {syns,col} of map){
+    if (syns.some(s => nq.includes(norm(s)))) {
+      const real = columns.find(h => norm(h)===norm(col));
+      if (real) return real;
+    }
+  }
+  const firstNum = columns.find(h => Number.isFinite(toNum((globalThis.__sampleRow||{})[h])));
+  return firstNum || columns[0];
+}
+
+function parseGroupKey(nq, cols){
+  if (has(nq,"por paralelo","por cada paralelo","por los paralelos")) return cols.find(h=>norm(h)==="paralelo") || "PARALELO";
+  if (has(nq,"por curso","por cada curso","por los cursos")) return cols.find(h=>norm(h)==="curso") || "CURSO";
+  return null;
+}
+
+function parseGroupFilter(nq, cols){
+  const parCol   = cols.find(h=>norm(h)==="paralelo") || "PARALELO";
+  const cursoCol = cols.find(h=>norm(h)==="curso")    || "CURSO";
+  const f = {};
+  const mPar = nq.match(/paralelo\s+([a-z0-9]+)/i);
+  if (mPar) f[parCol] = mPar[1].toUpperCase();
+  const mCurso = nq.match(/curso\s+([a-záéíóúüñ0-9]+)/i);
+  if (mCurso) f[cursoCol] = norm(mCurso[1]).toUpperCase(); // DECIMO
+  return f;
+}
+function filterByObj(rows, f){
+  const keys = Object.keys(f||{});
+  if (!keys.length) return rows;
+  return rows.filter(r => keys.every(k => norm(String(r[k])) === norm(String(f[k]))));
+}
+
+function parseTopBottom(nq){
+  if (!nq.includes("top") && !has(nq,"ranking","mejores","peores")) return null;
+  const m = nq.match(/top\s+(\d+)/); 
+  const k = m? Math.max(1,Math.min(50,parseInt(m[1],10))) : 5;
+  const desc = has(nq,"mas alta","más alta","mayor","maximo","máximo","mejores");
+  const asc  = has(nq,"mas baja","más baja","menor","minimo","mínimo","peores");
+  return { k, order: desc ? "desc" : asc ? "asc" : "desc" };
+}
+
+function parseThreshold(nq){
+  const ops = [
+    {re:/mayor\s+o\s+igual\s+a\s+(\d+)/, op:">="},
+    {re:/menor\s+o\s+igual\s+a\s+(\d+)/, op:"<="},
+    {re:/mayor\s+a\s+(\d+)/, op:">"},
+    {re:/menor\s+a\s+(\d+)/, op:"<"},
+    {re:/(>=|=>)\s*(\d+)/, op:">=", idx:2},
+    {re:/(<=|=<)\s*(\d+)/, op:"<=", idx:2},
+    {re:/(>|<)\s*(\d+)/, idx:2},
+  ];
+  for (const o of ops){
+    const m = nq.match(o.re);
+    if (m){
+      const val = parseFloat(m[o.idx||1]);
+      const op  = o.op || m[1];
+      return { op, val };
+    }
+  }
+  return null;
+}
+function passThreshold(v, thr){
+  if (!thr) return true;
+  const n = toNum(v); if (!Number.isFinite(n)) return false;
+  switch (thr.op){
+    case ">":  return n >  thr.val;
+    case "<":  return n <  thr.val;
+    case ">=": return n >= thr.val;
+    case "<=": return n <= thr.val;
+    default:   return true;
+  }
+}
+function percentileOf(value, arrNums){
+  const xs = arrNums.filter(Number.isFinite).sort((a,b)=>a-b);
+  if (!xs.length || !Number.isFinite(value)) return NaN;
+  let rank = xs.findIndex(v => v > value);
+  if (rank === -1) rank = xs.length;
+  return Math.round((rank / xs.length) * 100);
+}
+
+/* ================== Resumen alumno (compartido) ================== */
+function buildStudentReport(rows, columns, personRaw){
+  const nameKey  = columns.find(h=>norm(h)==="nombre")   || "NOMBRE";
+  const cursoKey = columns.find(h=>norm(h)==="curso")    || "CURSO";
+  const parKey   = columns.find(h=>norm(h)==="paralelo") || "PARALELO";
+
+  const { student, suggestions } = findBestStudent(rows, personRaw);
+  if (!student) {
+    return {
+      ok:true,
+      general:`No encontré a '${personRaw}' en decimo.csv.`,
+      lists: suggestions.length ? [{ title:"¿Quizás te refieres a…?", items:suggestions }] : [],
+      tables:[]
+    };
+  }
+
+  const key = (name) => columns.find(h => norm(h) === norm(name)) || name;
+  const K = {
+    NOMBRE: nameKey,
+    CURSO:  cursoKey,
+    PARALELO: parKey,
+    IE: key("PROMEDIO DE INTELIGENCIA EMOCIONAL"),
+  };
+
+  const DOMS = [
+    "PROMEDIO DE HABILIDADES INTRAPERSONALES",
+    "PROMEDIO DE HABILIDADES INTERPERSONALES",
+    "PROMEDIO DE HABILIDADES PARA LA VIDA",
+    "PROMEDIO DE INTELIGENCIA EMOCIONAL",
+  ].map(key);
+  const HABS = [
+    "AUTOESTIMA",
+    "ASERTIVIDAD",
+    "CONCIENCIA DE LOS DEMÁS",
+    "EMPATÍA",
+    "MOTIVACIÓN",
+    "COMPROMISO",
+    "ADMINISTRACIÓN DEL TIEMPO",
+    "TOMA DE DECISIONES",
+    "LIDERAZGO",
+  ].map(key);
+
+  const nombre   = student[K.NOMBRE];
+  const curso    = student[K.CURSO];
+  const paralelo = student[K.PARALELO];
+  const ie       = toNum(student[K.IE]);
+
+  const pares = HABS
+    .filter(h => student[h] !== undefined && student[h] !== "")
+    .map(h => [h, toNum(student[h])])
+    .filter(([, v]) => Number.isFinite(v));
+
+  const fortalezas = pares.filter(([, v]) => v >= 71).sort((a,b)=>b[1]-a[1]).slice(0,5)
+    .map(([h,v])=>`${h}: ${v} (${bucket(v)})`);
+  const mejoras    = pares.filter(([, v]) => v <= 40).sort((a,b)=>a[1]-b[1]).slice(0,5)
+    .map(([h,v])=>`${h}: ${v} (${bucket(v)})`);
+
+  const perfilRows = pares.sort((a,b)=>b[1]-a[1]).map(([h,v])=>[h, v, bucket(v)]);
+  const domRows = DOMS.map(d => [d, toNum(student[d]), bucket(toNum(student[d]))]).filter(r=>Number.isFinite(r[1]));
+
+  const general = `Informe socioemocional de ${nombre} (CURSO ${curso}, PARALELO ${paralelo}). IE Global: ${Number.isFinite(ie)?ie:"—"} (${bucket(ie)}).`;
+
+  const lists = [];
+  if (fortalezas.length) lists.push({ title:"Fortalezas destacadas", items:fortalezas });
+  if (mejoras.length)    lists.push({ title:"Áreas de mejora prioritarias", items:mejoras });
+
+  return {
+    ok:true,
+    general,
+    tables: [
+      { title:"Perfil por Habilidad", columns:["Habilidad","Puntaje","Rango"], rows:perfilRows },
+      { title:"Dominios", columns:["Dominio","Puntaje","Rango"], rows:domRows },
+    ],
+    lists
+  };
+}
+
+/* ================== API ================== */
 app.get("/api/ping", (req, res) => {
   res.json({ ok:true, pong:"🏓", region: process.env.FLY_REGION || process.env.PRIMARY_REGION || "?" });
 });
@@ -185,7 +365,7 @@ app.delete("/api/files", requireAdmin, async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-// CSV debug
+// CSV debug (requiere admin)
 app.get("/api/csv", requireAdmin, async (req,res)=>{
   try{
     const name = String(req.query.name||"decimo.csv");
@@ -199,10 +379,12 @@ app.get("/api/students", async (req,res)=>{
   try{
     const { rows } = await loadCSV("decimo.csv");
     const q = String(req.query.q||"");
-    if (!q) return res.json({ ok:true, count: rows.length, names: rows.map(r=>r.NOMBRE).slice(0,200) });
+    const nameKey = rows.length ? Object.keys(rows[0]).find(h=>norm(h)==="nombre") || "NOMBRE" : "NOMBRE";
+    if (!q) return res.json({ ok:true, count: rows.length, names: rows.map(r=>r[nameKey]).slice(0,200) });
+
     const qTok = tokenizeName(q);
     const names = rows
-      .map(r=>r.NOMBRE)
+      .map(r=>r[nameKey])
       .map(n=>({n, score: tokenizeName(n).filter(t=>qTok.includes(t)).length}))
       .filter(x=>x.score>0)
       .sort((a,b)=> b.score - a.score || norm(a.n).length - norm(b.n).length)
@@ -211,136 +393,158 @@ app.get("/api/students", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-// ===== /api/answer: consultas generales =====
-// ===== /api/answer: consultas generales (sin exigir "según decimo.csv") =====
+/* ============= /api/answer: consultas naturales ============= */
 app.get("/api/answer", async (req, res) => {
   try{
-    const q = String(req.query.q||"").trim();
+    const q  = String(req.query.q||"").trim();
     const nq = norm(q);
 
     const { rows, columns } = await loadCSV("decimo.csv");
-    if (!rows.length) {
-      return res.json({ ok:true, general:"No hay filas en decimo.csv.", lists:[], tables:[] });
+    if (!rows.length) return res.json({ ok:true, general:"No hay filas en decimo.csv.", lists:[], tables:[] });
+    globalThis.__sampleRow = rows[0];
+
+    const nameKey  = columns.find(h=>norm(h)==="nombre")   || "NOMBRE";
+    const parKey   = columns.find(h=>norm(h)==="paralelo") || "PARALELO";
+    const cursoKey = columns.find(h=>norm(h)==="curso")    || "CURSO";
+
+    // 0) Reporte completo (si el front no llamó /api/report)
+    if (has(nq,"reporte completo de")){
+      const person = q.replace(/.*reporte\s+completo\s+de\s+/i,"").trim();
+      const result = buildStudentReport(rows, columns, person);
+      return res.json(result);
     }
 
-    // utilidades
-    const colByNorm = {}; columns.forEach(h => colByNorm[norm(h)] = h);
-    const has = (...tokens) => tokens.some(t => nq.includes(norm(t)));
-
-    // Detectar métrica mencionada (si el usuario la nombra)
-    let measure = columns.find(h => nq.includes(norm(h)));
-    // Si no la nombra, intenta una razonable por defecto
-    if (!measure) {
-      measure = colByNorm[norm("PROMEDIO DE INTELIGENCIA EMOCIONAL")]
-             || colByNorm[norm("AUTOESTIMA")]
-             || columns.find(h => Number.isFinite(toNum(rows[0]?.[h])))
-             || columns[0];
-    }
-
-    const nameKey = colByNorm[norm("NOMBRE")] || "NOMBRE";
-    const parKey  = colByNorm[norm("PARALELO")] || "PARALELO";
-    const cursoKey= colByNorm[norm("CURSO")]   || "CURSO";
-
-    // ========== 1) "muestra N filas" ==========
+    // 1) Muestra N filas
     {
       const m = nq.match(/muestra\s+(\d+)\s+filas/);
-      if (m) {
+      if (m){
         const n = Math.max(1, Math.min(50, parseInt(m[1],10)));
-        const subsetCols = [nameKey, cursoKey, parKey, measure].filter(Boolean);
+        const measure = pickMeasure(nq, columns);
+        const subsetCols = [nameKey, cursoKey, parKey];
+        if (!subsetCols.includes(measure)) subsetCols.push(measure);
         const sample = rows.slice(0,n).map(r => subsetCols.map(c=>r[c]));
-        return res.json({
-          ok:true,
-          general:`Primeras ${n} filas.`,
-          tables:[{title:"Muestra", columns:subsetCols, rows:sample}],
-          lists:[]
-        });
+        return res.json({ ok:true, general:`Primeras ${n} filas.`, tables:[{title:"Muestra", columns:subsetCols, rows:sample}], lists:[] });
       }
     }
 
-    // ========== 2) "promedio de X por PARALELO|CURSO|Global" ==========
-    if (has("promedio")) {
-      // ¿por qué agrupamos?
-      let groupKey = null;
-      if (has("por paralelo")) groupKey = parKey;
-      if (has("por curso"))    groupKey = cursoKey;
+    // 2) Promedio de X [por paralelo/curso/global] [filtro en paralelo X / curso DECIMO]
+    if (has(nq,"promedio","media")){
+      const measure   = pickMeasure(nq, columns);
+      const groupKey  = parseGroupKey(nq, columns);
+      const filterObj = parseGroupFilter(nq, columns);
+      const base      = filterByObj(rows, filterObj);
 
-      // Global
-      if (has("global") || (!groupKey && !has("por"))) {
-        const avg = mean(rows.map(r => r[measure]));
+      if (!groupKey){ // Global (o solo con filtro)
+        const avg = mean(base.map(r => r[measure]));
         return res.json({
           ok:true,
-          general:`Promedio global de ${measure}.`,
-          tables:[{title:"Global", columns:["Métrica","Promedio"], rows:[[measure, isNaN(avg)?"—":avg]]}],
+          general:`Promedio de ${measure}${Object.keys(filterObj).length? " (filtrado)":""}.`,
+          tables:[{ title:"Promedio", columns:["Métrica","Promedio"], rows:[[measure, isNaN(avg)?"—":avg]] }],
           lists:[]
         });
       }
 
-      // Agrupado
-      if (groupKey) {
-        const groups = by(rows, groupKey);
-        const trows = [];
-        for (const [gkey, arr] of groups) {
-          trows.push([gkey, isNaN(mean(arr.map(r=>r[measure])))?"—":mean(arr.map(r=>r[measure]))]);
-        }
-        trows.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
-        return res.json({
-          ok:true,
-          general:`Promedio de ${measure} por ${groupKey}.`,
-          tables:[{title:`${groupKey}`, columns:[groupKey,"Promedio"], rows:trows}],
-          lists:[]
-        });
-      }
-      // Si dijo "promedio" pero no especificó grupo, ya devolvimos global arriba.
-    }
-
-    // ========== 3) "top N ... más alta / más baja" ==========
-    if (nq.includes("top")) {
-      const mm = nq.match(/top\s+(\d+)/); 
-      const k = mm ? Math.max(1, Math.min(50, parseInt(mm[1],10))) : 5;
-      const desc = (has("más alta","mas alta","mayor","maximo","máximo"));
-      const asc  = (has("más baja","mas baja","menor","minimo","mínimo"));
-
-      const data = rows
-        .map(r => [r[nameKey], r[parKey], toNum(r[measure])])
-        .filter(x => Number.isFinite(x[2]));
-
-      data.sort((a,b)=> desc ? (b[2]-a[2]) : asc ? (a[2]-b[2]) : (b[2]-a[2]));
-
+      const groups = by(base, groupKey);
+      const trows = [];
+      for (const [gkey, arr] of groups) trows.push([gkey, isNaN(mean(arr.map(r=>r[measure])))?"—":mean(arr.map(r=>r[measure]))]);
+      trows.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
       return res.json({
         ok:true,
-        general:`Top ${k} por ${measure} ${desc?"(más alta)":asc?"(más baja)":""}.`,
-        tables:[{title:"Top", columns:[nameKey, parKey, measure], rows:data.slice(0,k)}],
+        general:`Promedio de ${measure} por ${groupKey}${Object.keys(filterObj).length? " (filtrado)":""}.`,
+        tables:[{title:`${groupKey}`, columns:[groupKey,"Promedio"], rows:trows}],
         lists:[]
       });
     }
 
-    // ========== 4) TXT: explica … según archivo ==========
-    if (has("segun","según") && (has("emocionales txt") || has("evaluacion txt") || has("ubicacion txt"))) {
+    // 3) Top/Bottom K (opcional filtro)
+    {
+      const tb = parseTopBottom(nq);
+      if (tb){
+        const measure   = pickMeasure(nq, columns);
+        const filterObj = parseGroupFilter(nq, columns);
+        let data = filterByObj(rows, filterObj)
+          .map(r => [r[nameKey], r[parKey], r[cursoKey], toNum(r[measure])])
+          .filter(x => Number.isFinite(x[3]));
+        data.sort((a,b)=> tb.order==="desc" ? (b[3]-a[3]) : (a[3]-b[3]));
+        const head = [nameKey, parKey, cursoKey, measure];
+        return res.json({
+          ok:true,
+          general:`Top ${tb.k} por ${measure}${tb.order==="asc"?" (más baja)": " (más alta)"}${Object.keys(filterObj).length? " (filtrado)":""}.`,
+          tables:[{title:"Top", columns:head, rows:data.slice(0, tb.k)}],
+          lists:[]
+        });
+      }
+    }
+
+    // 4) Listado por umbral: “quienes tienen X > 70 [en paralelo A]”
+    if (has(nq,"quien","quienes","lista","listar","muestrame","mostrar")){
+      const thr = parseThreshold(nq);
+      if (thr){
+        const measure   = pickMeasure(nq, columns);
+        const filterObj = parseGroupFilter(nq, columns);
+        let data = filterByObj(rows, filterObj)
+          .map(r => [r[nameKey], r[parKey], r[cursoKey], toNum(r[measure])])
+          .filter(x => Number.isFinite(x[3]) && passThreshold(x[3], thr))
+          .sort((a,b)=>b[3]-a[3]);
+        const head = [nameKey, parKey, cursoKey, measure];
+        return res.json({
+          ok:true,
+          general:`Listado por umbral (${measure} ${thr.op} ${thr.val})${Object.keys(filterObj).length? " (filtrado)":""}.`,
+          tables:[{title:"Resultados", columns:head, rows:data.slice(0, 200)}],
+          lists:[]
+        });
+      }
+    }
+
+    // 5) Percentil: “percentil de NOMBRE en HABILIDAD [en paralelo A|curso DECIMO]”
+    if (has(nq,"percentil")){
+      const m = nq.match(/percentil\s+de\s+(.+?)\s+en\s+(.+)/i);
+      if (m){
+        const personRaw = m[1].trim();
+        const measRaw   = m[2].trim();
+        const measure   = pickMeasure(norm(measRaw), columns);
+        const filterObj = parseGroupFilter(nq, columns);
+        const base      = filterByObj(rows, filterObj);
+
+        const { student } = findBestStudent(base, personRaw);
+        if (!student) return res.json({ ok:true, general:`No encontré a '${personRaw}'.`, lists:[], tables:[] });
+
+        const val = toNum(student[measure]);
+        const p   = percentileOf(val, base.map(r=>toNum(r[measure])));
+        return res.json({
+          ok:true,
+          general:`Percentil de ${student[nameKey]} en ${measure}${Object.keys(filterObj).length? " (cohorte filtrada)":""}: ${Number.isFinite(p)?p:"—"}.`,
+          tables:[{title:"Detalle", columns:["Alumno", "Paralelo", "Curso", "Métrica", "Valor", "Percentil"], rows:[[student[nameKey], student[parKey], student[cursoKey], measure, Number.isFinite(val)?val:"—", Number.isFinite(p)?p:"—"]]}],
+          lists:[]
+        });
+      }
+    }
+
+    // 6) TXT: “explica … según emocionales/evaluacion/ubicacion”
+    if (has(nq,"segun","según") && (has(nq,"emocionales txt","evaluacion txt","ubicacion txt"))){
       let fname = "emocionales.txt";
-      if (has("evaluacion txt")) fname = "evaluacion.txt";
-      if (has("ubicacion txt"))  fname = "ubicacion.txt";
+      if (has(nq,"evaluacion txt")) fname = "evaluacion.txt";
+      if (has(nq,"ubicacion txt"))  fname = "ubicacion.txt";
       const txt = await readText(fname);
       if (!txt) return res.json({ ok:true, general:`No encontré ${fname} en storage.`, lists:[], tables:[] });
       return res.json({ ok:true, general: txt.slice(0,1200) + (txt.length>1200 ? " …" : ""), lists:[], tables:[] });
     }
 
-    // ========== Fallback mejorado ==========
+    // Fallback
     return res.json({
       ok:true,
-      general:"No entendí del todo. Ejemplos: “reporte completo de Castillo D Julia”, “top 5 estudiantes con AUTOESTIMA más baja”, “promedio de ASERTIVIDAD por PARALELO”, “muestra 5 filas”.",
-      lists:[],
-      tables:[]
+      general:"No entendí del todo. Ejemplos: “promedio de ASERTIVIDAD por PARALELO (en curso DECIMO)”, “top 5 en IE global (en paralelo B)”, “quienes tienen TIMIDEZ > 70 (en paralelo A)”, “percentil de Castillo D Julia en AUTOESTIMA (en curso DECIMO)”, “muestra 5 filas”.",
+      lists:[], tables:[]
     });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
 
-
-// ===== /api/report: perfil completo de un estudiante =====
+/* ============= /api/report: perfil completo alumno ============= */
 app.get("/api/report", async (req, res) => {
   try{
-    const q = String(req.query.q||"");
+    const q  = String(req.query.q||"");
     const nq = norm(q);
     let person = q;
     const m = nq.match(/reporte\s+completo\s+de\s+(.+)/);
@@ -349,79 +553,14 @@ app.get("/api/report", async (req, res) => {
     const { rows, columns } = await loadCSV("decimo.csv");
     if (!rows.length) return res.json({ ok:true, general:"No hay datos en decimo.csv.", lists:[], tables:[] });
 
-    const { student, suggestions } = findBestStudent(rows, person);
-    if (!student) {
-      return res.json({
-        ok:true,
-        general:`No encontré a '${person}' en decimo.csv.`,
-        lists: suggestions.length ? [{ title:"¿Quizás te refieres a…?", items:suggestions }] : [],
-        tables:[]
-      });
-    }
-
-    const key = (name) => columns.find(h => norm(h) === norm(name)) || name;
-    const K = {
-      NOMBRE: key("NOMBRE"),
-      CURSO: key("CURSO"),
-      PARALELO: key("PARALELO"),
-      IE: key("PROMEDIO DE INTELIGENCIA EMOCIONAL"),
-    };
-
-    const DOMS = [
-      "PROMEDIO DE HABILIDADES INTRAPERSONALES",
-      "PROMEDIO DE HABILIDADES INTERPERSONALES",
-      "PROMEDIO DE HABILIDADES PARA LA VIDA",
-      "PROMEDIO DE INTELIGENCIA EMOCIONAL",
-    ].map(key);
-    const HABS = [
-      "AUTOESTIMA",
-      "ASERTIVIDAD",
-      "CONCIENCIA DE LOS DEMÁS",
-      "EMPATÍA",
-      "MOTIVACIÓN",
-      "COMPROMISO",
-      "ADMINISTRACIÓN DEL TIEMPO",
-      "TOMA DE DECISIONES",
-      "LIDERAZGO",
-    ].map(key);
-
-    const nombre = student[K.NOMBRE];
-    const curso = student[K.CURSO];
-    const paralelo = student[K.PARALELO];
-    const ie = toNum(student[K.IE]);
-
-    const pares = HABS
-      .filter(h => student[h] !== undefined && student[h] !== "")
-      .map(h => [h, toNum(student[h])])
-      .filter(([, v]) => Number.isFinite(v));
-
-    const fortalezas = pares.filter(([, v]) => v >= 71).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([h,v])=>`${h}: ${v} (${bucket(v)})`);
-    const mejoras    = pares.filter(([, v]) => v <= 40).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([h,v])=>`${h}: ${v} (${bucket(v)})`);
-
-    const perfilRows = pares.sort((a,b)=>b[1]-a[1]).map(([h,v])=>[h, v, bucket(v)]);
-    const domRows = DOMS.map(d => [d, toNum(student[d]), bucket(toNum(student[d]))]).filter(r=>Number.isFinite(r[1]));
-
-    const general = `Informe socioemocional de ${nombre} (CURSO ${curso}, PARALELO ${paralelo}). IE Global: ${Number.isFinite(ie)?ie:"—"} (${bucket(ie)}).`;
-
-    const lists = [];
-    if (fortalezas.length) lists.push({ title:"Fortalezas destacadas", items:fortalezas });
-    if (mejoras.length)    lists.push({ title:"Áreas de mejora prioritarias", items:mejoras });
-
-    return res.json({
-      ok:true,
-      general,
-      tables: [
-        { title:"Perfil por Habilidad", columns:["Habilidad","Puntaje","Rango"], rows:perfilRows },
-        { title:"Dominios", columns:["Dominio","Puntaje","Rango"], rows:domRows },
-      ],
-      lists
-    });
+    const result = buildStudentReport(rows, columns, person);
+    res.json(result);
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
 
-// ===== START =====
+/* ================== START ================== */
 app.listen(PORT, () => {
   console.log(`API ready on :${PORT}`);
 });
