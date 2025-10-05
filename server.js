@@ -1,39 +1,39 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import fs from "fs/promises";
+import fssync from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// ===== BASICS =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ---------- Config ----------
 const PORT = process.env.PORT || 8080;
-const STORAGE_DIR = process.env.STORAGE_DIR || "/app/storage"; // Fly volume
+const STORAGE = process.env.STORAGE_DIR || "/app/storage";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "lexium123";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "*")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-await fs.mkdir(STORAGE_DIR, { recursive: true });
+// Asegura carpeta de storage
+await fs.mkdir(STORAGE, { recursive: true });
 
-// ===== APP =====
+// ---------- App ----------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-// CORS
+// CORS flexible
 app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin || CORS_ORIGINS.includes("*")) return cb(null, true);
       const ok = CORS_ORIGINS.some(allowed => {
-        if (allowed.endsWith("*")) {
-          // wildcard simple: https://*.vercel.app
-          const base = allowed.slice(0, -1);
-          return origin.startsWith(base);
-        }
+        if (allowed.startsWith("https://*."))
+          return origin === allowed.slice(0, 8) + origin.split("://")[1].split(".").slice(-2).join(".");
         return origin === allowed;
       });
       cb(null, ok);
@@ -41,342 +41,493 @@ app.use(
   })
 );
 
-// ===== Helpers =====
-const upload = multer({ storage: multer.memoryStorage() });
-
-function norm(s = "") {
-  return String(s)
+// ---------- Utils ----------
+const norm = (s) =>
+  String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita tildes
+    .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-function isAdmin(req) {
-  return req.headers["x-admin-token"] === ADMIN_TOKEN;
-}
-function param(req, name, def = "") {
-  return (req.query?.[name] ?? def).toString();
-}
-function toNum(x) {
-  if (x === null || x === undefined) return NaN;
-  const n = Number(String(x).replace(",", "."));
+
+const toNum = (v) => {
+  if (v === null || v === undefined) return NaN;
+  const s = String(v).replace(",", ".").replace(/[^\d.\-]/g, "");
+  const n = parseFloat(s);
   return Number.isFinite(n) ? n : NaN;
+};
+
+const mean = (arr) => {
+  const nums = arr.map(toNum).filter(Number.isFinite);
+  if (!nums.length) return NaN;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+};
+
+const bucket = (n) => {
+  if (!Number.isFinite(n)) return "Sin dato";
+  if (n <= 40) return "BAJO";
+  if (n <= 70) return "PROMEDIO";
+  return "ALTO";
+};
+
+const exists = async (p) => {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Copia segura (para EXDEV)
+const safeWrite = async (destPath, buffer) => {
+  const tmp = path.join(STORAGE, `.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  await fs.writeFile(tmp, buffer);
+  await fs.rename(tmp, destPath).catch(async (e) => {
+    // Si falla rename (EXDEV), hacemos copyFile
+    await fs.copyFile(tmp, destPath);
+    await fs.unlink(tmp).catch(() => {});
+  });
+};
+
+// ---------- CSV ----------
+async function loadCSV(name = "decimo.csv") {
+  const filePath = path.join(STORAGE, name);
+  if (!(await exists(filePath))) throw new Error(`No existe ${name} en storage.`);
+
+  const raw = await fs.readFile(filePath, "utf8");
+
+  // Normaliza saltos y detecta delimitador
+  const lines = raw.replace(/\r/g, "").split("\n").filter(x => x.length);
+  if (!lines.length) throw new Error("CSV vacío.");
+
+  // Delimitador por conteo simple
+  const first = lines[0];
+  let delim = ",";
+  const cntComma = (first.match(/,/g) || []).length;
+  const cntSemi = (first.match(/;/g) || []).length;
+  if (cntSemi > cntComma) delim = ";";
+
+  const headers = first.split(delim).map(h => h.trim());
+  const rows = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(delim).map(p => p.replace(/^"(.*)"$/, "$1").trim());
+    const row = {};
+    headers.forEach((h, idx) => (row[h] = parts[idx] ?? ""));
+    rows.push(row);
+  }
+
+  // Mapa de nombre normalizado -> clave original
+  const headerMap = {};
+  headers.forEach(h => (headerMap[norm(h)] = h));
+
+  // Detecta columnas numéricas y castea
+  for (const key of headers) {
+    const sample = rows.slice(0, 20).map(r => toNum(r[key])).filter(n => !Number.isNaN(n));
+    if (sample.length >= 3) {
+      // Consideramos numérica si mayoría es número
+      const numeric = sample.length >= 2;
+      if (numeric) {
+        for (const r of rows) {
+          const n = toNum(r[key]);
+          if (Number.isFinite(n)) r[key] = n;
+        }
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    delimiter: delim,
+    count: rows.length,
+    columns: headers,
+    headerMap,
+    rows,
+    sample: rows.slice(0, 5),
+  };
 }
-function pick(obj, keys) {
-  const out = {};
-  for (const k of keys) out[k] = obj[k];
+
+function findColumn(headers, cand) {
+  const hmap = {};
+  headers.forEach(h => (hmap[norm(h)] = h));
+  return hmap[norm(cand)] || null;
+}
+
+function groupAverage(rows, groupKey, measureKey) {
+  const map = new Map();
+  for (const r of rows) {
+    const g = r[groupKey];
+    const v = toNum(r[measureKey]);
+    if (!Number.isFinite(v)) continue;
+    if (!map.has(g)) map.set(g, []);
+    map.get(g).push(v);
+  }
+  const out = [];
+  for (const [g, arr] of map.entries()) {
+    out.push([g, Number(mean(arr).toFixed(1))]);
+  }
+  // Orden alfabético por grupo
+  out.sort((a, b) => (String(a[0]).localeCompare(String(b[0]))));
   return out;
 }
-function bucket(v) {
-  const n = toNum(v);
-  if (!Number.isFinite(n)) return "—";
-  if (n <= 40) return "Bajo (1–40)";
-  if (n <= 70) return "Promedio (41–70)";
-  return "Alto (71–100)";
+
+// ---------- TXT ----------
+async function readTextBase(name) {
+  const p = path.join(STORAGE, name);
+  if (!(await exists(p))) return "";
+  // Intentamos leer como UTF-8 "tal cual"
+  return await fs.readFile(p, "utf8");
 }
-function by(arr, key) {
-  const m = new Map();
-  for (const r of arr) {
-    const k = r[key];
-    if (!m.has(k)) m.set(k, []);
-    m.get(k).push(r);
+
+// ---------- Nombre tolerante ----------
+function tokenizeName(s) {
+  return norm(s).split(/\s+/).filter(Boolean);
+}
+
+function findBestStudent(rows, query) {
+  const qn = norm(query);
+  const exact = rows.find(r => norm(r.NOMBRE) === qn);
+  if (exact) return { student: exact, suggestions: [] };
+
+  const qTok = tokenizeName(qn);
+  const scored = rows
+    .map(r => {
+      const nTok = tokenizeName(r.NOMBRE);
+      let hits = 0;
+      for (const qt of qTok) if (nTok.includes(qt)) hits++;
+      return { r, hits };
+    })
+    .filter(x => x.hits > 0);
+
+  scored.sort((a, b) => b.hits - a.hits || norm(a.r.NOMBRE).length - norm(b.r.NOMBRE).length);
+
+  if (scored.length && scored[0].hits >= Math.min(qTok.length, 2)) {
+    return { student: scored[0].r, suggestions: scored.slice(1, 6).map(x => x.r.NOMBRE) };
   }
-  return m;
-}
-function mean(nums) {
-  const vals = nums.map(toNum).filter(Number.isFinite);
-  if (!vals.length) return NaN;
-  return Math.round((vals.reduce((a,b)=>a+b,0)/vals.length) * 10) / 10;
+  return { student: null, suggestions: scored.slice(0, 10).map(x => x.r.NOMBRE) };
 }
 
-// ===== CSV loader (auto ; o ,) =====
-async function loadCSV(filename) {
-  const full = path.join(STORAGE_DIR, filename);
-  const raw = await fs.readFile(full, "utf8");
-  const lines = raw
-    .split(/\r?\n/)
-    .filter(l => l.trim().length)
-    .map(l => l.replace(/\uFEFF/g, "")); // quita BOM si existe
+// ---------- Multer (subida) ----------
+const upload = multer({ storage: multer.memoryStorage() });
 
-  if (!lines.length) return { columns: [], rows: [], delimiter: "," };
-
-  // detecta delimitador
-  const first = lines[0];
-  const delimiter = first.includes(",") && !first.includes(";") ? ","
-                   : first.includes(";") && !first.includes(",") ? ";"
-                   : (first.split(",").length >= first.split(";").length ? "," : ";");
-
-  const headers = first.split(delimiter).map(h => h.trim());
-  const rows = lines.slice(1).map(l => {
-    const parts = l.split(delimiter).map(s => s.trim());
-    const obj = {};
-    headers.forEach((h, i) => (obj[h] = parts[i] ?? ""));
-    return obj;
-  });
-  return { columns: headers, rows, delimiter };
+// ---------- Middleware admin ----------
+function requireAdmin(req, res, next) {
+  const tok = req.headers["x-admin-token"];
+  if (!ADMIN_TOKEN) return res.status(500).json({ ok: false, error: "admin_token_not_set" });
+  if (tok !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "bad_admin_token" });
+  next();
 }
 
-// ===== Files =====
+// ---------- API ----------
 app.get("/api/ping", (req, res) => {
-  res.json({ ok: true, pong: "🏓", region: process.env.PRIMARY_REGION || "?" });
+  res.json({ ok: true, pong: "🏓", region: process.env.FLY_REGION || "unknown" });
 });
 
+// Lista de archivos
 app.get("/api/files", async (req, res) => {
   try {
-    const entries = await fs.readdir(STORAGE_DIR, { withFileTypes: true });
-    const files = entries.filter(e => e.isFile()).map(e => e.name);
-    res.json({ ok: true, files });
+    const items = await fs.readdir(STORAGE);
+    res.json({ ok: true, files: items.sort() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-app.post("/api/files/upload", upload.array("files"), async (req, res) => {
+// Sube archivos
+app.post("/api/files/upload", requireAdmin, upload.array("files"), async (req, res) => {
   try {
-    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
-    if (!req.files?.length) return res.status(400).json({ ok: false, error: "no_files" });
-
+    if (!req.files || !req.files.length) return res.status(400).json({ ok: false, error: "no_files" });
     const saved = [];
     for (const f of req.files) {
-      const dest = path.join(STORAGE_DIR, f.originalname);
-      await fs.writeFile(dest, f.buffer);
+      const dest = path.join(STORAGE, f.originalname);
+      await safeWrite(dest, f.buffer);
       saved.push(f.originalname);
     }
-    res.json({ ok: true, saved });
+    res.json({ ok: true, files: saved });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-app.delete("/api/files", async (req, res) => {
+// Borra archivo por nombre
+app.delete("/api/files", requireAdmin, async (req, res) => {
   try {
-    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
-    const name = param(req, "name");
+    const name = String(req.query.name || "");
     if (!name) return res.status(400).json({ ok: false, error: "missing_name" });
-    await fs.unlink(path.join(STORAGE_DIR, name));
-    res.json({ ok: true, deleted: name });
+    const p = path.join(STORAGE, name);
+    if (!(await exists(p))) return res.json({ ok: true, deleted: false, message: "not_found" });
+    await fs.unlink(p);
+    res.json({ ok: true, deleted: true, name });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-app.get("/api/debug/csv", async (req, res) => {
+// Debug CSV (estructura)
+app.get("/api/csv", requireAdmin, async (req, res) => {
   try {
-    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
-    const name = param(req, "name", "decimo.csv");
-    const { columns, rows, delimiter } = await loadCSV(name);
+    const name = String(req.query.name || "decimo.csv");
+    const csv = await loadCSV(name);
     res.json({
       ok: true,
-      delimiter,
-      columns,
-      count: rows.length,
-      sample: rows.slice(0, 5),
+      delimiter: csv.delimiter,
+      count: csv.count,
+      columns: csv.columns,
+      sample: csv.sample,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ===== Domain config =====
-const DOM_INDIVIDUALES = [
-  "AUTOESTIMA",
-  "MANEJO DE LA TENSIÓN",
-  "BIENESTAR FÍSICO",
-  "ASERTIVIDAD",
-  "CONCIENCIA DE LOS DEMÁS",
-  "EMPATÍA",
-  "MOTIVACIÓN",
-  "COMPROMISO",
-  "ADMINISTRACIÓN DEL TIEMPO",
-  "TOMA DE DECISIONES",
-  "LIDERAZGO",
-];
+// Autocompletar estudiantes
+app.get("/api/students", async (req, res) => {
+  try {
+    const { rows } = await loadCSV("decimo.csv");
+    const q = (req.query.q || "").toString();
+    if (!q) return res.json({ ok: true, count: rows.length, names: rows.map(r => r.NOMBRE).slice(0, 200) });
 
-const DOM_PROMEDIOS = [
-  "PROMEDIO DE HABILIDADES INTRAPERSONALES",
-  "PROMEDIO DE HABILIDADES INTERPERSONALES",
-  "PROMEDIO DE HABILIDADES PARA LA VIDA",
-  "PROMEDIO DE INTELIGENCIA EMOCIONAL",
-];
+    const qTok = tokenizeName(q);
+    let names = rows
+      .map(n => n.NOMBRE)
+      .map(n => ({ n, score: tokenizeName(n).filter(t => qTok.includes(t)).length }))
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score || norm(a.n).length - norm(b.n).length)
+      .map(x => x.n);
 
-// ===== /api/answer (consultas rápidas) =====
+    res.json({ ok: true, count: names.length, names: names.slice(0, 100) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ----- /api/answer -----
+// Patrones soportados:
+// 1) "muestra N filas de decimo.csv"
+// 2) "promedio de {COLUMNA} por PARALELO|CURSO|CURSO y PARALELO según decimo.csv"
+// 3) "top N estudiantes con {COLUMNA} más alta|baja según decimo.csv"
+// 4) "explica ... según emocionales.txt|evaluacion.txt|ubicacion.txt"
 app.get("/api/answer", async (req, res) => {
   try {
-    const q = param(req, "q");
-    const { rows, columns } = await loadCSV("decimo.csv");
-    if (!rows.length) {
-      return res.json({ ok: true, general: "No hay filas en decimo.csv.", lists: [], tables: [] });
+    const q = String(req.query.q || "");
+    const nq = norm(q);
+
+    // CSV principal
+    const csv = await loadCSV("decimo.csv");
+    const rows = csv.rows;
+    const headers = csv.columns;
+
+    const colByNorm = {};
+    headers.forEach(h => (colByNorm[norm(h)] = h));
+
+    // 1) Muestra N filas
+    if (/muestra\s+\d+\s+filas/.test(nq) && nq.includes("decimo csv")) {
+      const m = nq.match(/muestra\s+(\d+)\s+filas/);
+      const k = m ? Math.max(1, Math.min(50, parseInt(m[1], 10))) : 3;
+      const subsetCols = ["NOMBRE", "CURSO", "PARALELO", "AUTOESTIMA"].map(c => colByNorm[norm(c)] || c);
+      const sample = rows.slice(0, k).map(r => subsetCols.map(c => r[c]));
+      return res.json({
+        ok: true,
+        general: `Mostrando ${k} filas de decimo.csv`,
+        tables: [{ title: "Muestra", columns: subsetCols, rows: sample }],
+        lists: [],
+      });
     }
 
-    // 1) muestra N filas
-    {
-      const m = q.match(/muestra\s+(\d+)\s+filas?\s+de\s+decimo\.csv/i);
-      if (m) {
-        const n = Math.max(1, Math.min(50, Number(m[1] || 3)));
-        const subset = rows.slice(0, n).map(r => pick(r, ["NOMBRE", "CURSO", "PARALELO"]));
-        return res.json({
-          ok: true,
-          general: `Primeras ${n} filas de decimo.csv.`,
-          lists: [],
-          tables: [
-            {
-              title: `Muestra (${n})`,
-              columns: ["NOMBRE", "CURSO", "PARALELO"],
-              rows: subset.map(r => [r.NOMBRE, r.CURSO, r.PARALELO]),
-            },
-          ],
-        });
+    // Helpers para detectar columna de medida desde la pregunta
+    function findMeasureFromQ() {
+      // Busca por nombre de columna mencionado en la pregunta
+      for (const h of headers) {
+        if (nq.includes(norm(h))) return h;
       }
+      // fallback común
+      return colByNorm[norm("AUTOESTIMA")] || "AUTOESTIMA";
     }
 
-    // 2) promedio de X por [PARALELO|CURSO|GLOBAL]
-    {
-      const m = q.match(/promedio\s+de\s+(.+?)\s+por\s+(PARALELO|CURSO|GLOBAL)\s+seg[uú]n\s+decimo\.csv/i);
-      if (m) {
-        const col = m[1].toUpperCase().trim();
-        const group = m[2].toUpperCase();
+    // 2) Promedio por grupo
+    if (nq.includes("promedio") && nq.includes("segun decimo csv")) {
+      const measure = findMeasureFromQ();
 
-        if (!columns.includes(col)) {
-          return res.json({
-            ok: true,
-            general: `Columna '${col}' no encontrada.`,
-            lists: [],
-            tables: [],
-          });
-        }
+      let groupKey = null;
+      if (nq.includes("por paralelo")) groupKey = colByNorm[norm("PARALELO")] || "PARALELO";
+      else if (nq.includes("por curso")) groupKey = colByNorm[norm("CURSO")] || "CURSO";
 
-        if (group === "GLOBAL") {
-          const avg = mean(rows.map(r => r[col]));
-          return res.json({
-            ok: true,
-            general: `Promedio global de ${col} calculado a partir de decimo.csv.`,
-            lists: [],
-            tables: [
-              { title: "Global", columns: ["Métrica", "Promedio"], rows: [[col, isNaN(avg) ? "—" : avg]] },
-            ],
-          });
-        }
-
-        const groups = by(rows, group);
-        const trows = [];
-        for (const [gkey, arr] of groups) {
-          const avg = mean(arr.map(r => r[col]));
-          trows.push([gkey, isNaN(avg) ? "—" : avg]);
-        }
-        trows.sort((a, b) => ("" + a[0]).localeCompare("" + b[0]));
-
-        return res.json({
-          ok: true,
-          general: `Promedio de ${col} por ${group} calculado a partir de decimo.csv.`,
-          lists: [],
-          tables: [{ title: `${group}`, columns: [group, "Promedio"], rows: trows }],
-        });
+      if (!groupKey) {
+        return res.json({ ok: true, general: "Indica si es por CURSO o por PARALELO.", lists: [], tables: [] });
       }
+
+      const table = groupAverage(rows, groupKey, measure);
+      return res.json({
+        ok: true,
+        general: `Promedios de ${measure} por ${groupKey}.`,
+        tables: [{ title: `Promedio de ${measure} por ${groupKey}`, columns: [groupKey, measure], rows: table }],
+        lists: [],
+      });
     }
 
-    // fallback
+    // 3) Top N ↑/↓
+    if (nq.includes("top") && nq.includes("segun decimo csv")) {
+      const m = nq.match(/top\s+(\d+)/);
+      const k = m ? Math.max(1, Math.min(50, parseInt(m[1], 10))) : 5;
+
+      const measure = findMeasureFromQ();
+      const desc = nq.includes("mas alta") || nq.includes("más alta");
+      const asc = nq.includes("mas baja") || nq.includes("más baja");
+
+      const nameKey = colByNorm[norm("NOMBRE")] || "NOMBRE";
+      const parKey = colByNorm[norm("PARALELO")] || "PARALELO";
+
+      const data = rows
+        .map(r => [r[nameKey], r[parKey], toNum(r[measure])])
+        .filter(x => Number.isFinite(x[2]));
+
+      data.sort((a, b) => (desc ? b[2] - a[2] : asc ? a[2] - b[2] : b[2] - a[2]));
+
+      return res.json({
+        ok: true,
+        general: `Top ${k} estudiantes por ${measure} (${desc ? "más alta" : asc ? "más baja" : "ordenado"})`,
+        tables: [{ title: "Top", columns: [nameKey, parKey, measure], rows: data.slice(0, k) }],
+        lists: [],
+      });
+    }
+
+    // 4) Lectura de TXT
+    if (nq.includes("segun") && (nq.includes("emocionales txt") || nq.includes("evaluacion txt") || nq.includes("ubicacion txt"))) {
+      let fname = "emocionales.txt";
+      if (nq.includes("evaluacion txt")) fname = "evaluacion.txt";
+      if (nq.includes("ubicacion txt")) fname = "ubicacion.txt";
+      const txt = await readTextBase(fname);
+      if (!txt) return res.json({ ok: true, general: `No encontré ${fname} en storage.`, tables: [], lists: [] });
+      const preview = txt.slice(0, 1200);
+      return res.json({
+        ok: true,
+        general: preview + (txt.length > 1200 ? " …" : ""),
+        tables: [],
+        lists: [],
+      });
+    }
+
+    // Fallback
     return res.json({
       ok: true,
       general:
-        "Pregunta recibida. Puedes pedir: “promedio de AUTOESTIMA por PARALELO según decimo.csv”, “muestra 3 filas de decimo.csv”, o pedir un reporte: “reporte completo de NOMBRE”.",
-      lists: [],
+        "Pregunta recibida. Puedes pedir: “promedio de AUTOESTIMA por PARALELO según decimo.csv”, “muestra 3 filas de decimo.csv”, o referirte a evaluacion.txt/emocionales.txt/ubicacion.txt.",
       tables: [],
+      lists: [],
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ===== /api/report =====
+// ----- /api/report -----
+// q = "reporte completo de Castillo D Julia"
 app.get("/api/report", async (req, res) => {
   try {
-    const q = param(req, "q");
-    const { rows, columns } = await loadCSV("decimo.csv");
-    if (!rows.length) {
-      return res.json({ ok: true, general: "No hay datos en decimo.csv.", lists: [], tables: [] });
-    }
+    const q = String(req.query.q || "");
+    const nq = norm(q);
 
-    // extrae nombre tras "de ..."
-    let person = "";
-    const m = q.match(/de\s+(.+)$/i);
-    if (m) person = m[1].trim();
-    if (!person) {
-      return res.json({ ok: true, general: "Indica el nombre: ‘reporte completo de <Nombre>’.", lists: [], tables: [] });
-    }
+    // Extrae nombre después de "de"
+    let person = q;
+    const m = nq.match(/reporte\s+completo\s+de\s+(.+)/);
+    if (m) person = q.slice(m.index + m[0].length).trim();
 
-    const wanted = norm(person);
-    const idx = rows.findIndex(r => norm(r.NOMBRE) === wanted);
-    const student = idx >= 0 ? rows[idx] : null;
+    const csv = await loadCSV("decimo.csv");
+    const rows = csv.rows;
+    const headers = csv.columns;
+
+    const { student, suggestions } = findBestStudent(rows, person);
     if (!student) {
-      return res.json({ ok: true, general: `No encontré a '${person}' en decimo.csv.`, lists: [], tables: [] });
+      return res.json({
+        ok: true,
+        general: `No encontré a '${person}' en decimo.csv.`,
+        lists: suggestions.length ? [{ title: "¿Quizás te refieres a…?", items: suggestions }] : [],
+        tables: [],
+      });
     }
 
-    const curso = student.CURSO || "—";
-    const paralelo = student.PARALELO || "—";
+    // Claves reales
+    const key = (name) => {
+      const idx = headers.find(h => norm(h) === norm(name));
+      return idx || name;
+    };
+    const K = {
+      NOMBRE: key("NOMBRE"),
+      CURSO: key("CURSO"),
+      PARALELO: key("PARALELO"),
+      IE: key("PROMEDIO DE INTELIGENCIA EMOCIONAL"),
+    };
 
-    // fortalezas / áreas (sobre dominios individuales)
-    const scores = [];
-    for (const col of DOM_INDIVIDUALES) {
-      if (!columns.includes(col)) continue;
-      const val = toNum(student[col]);
-      if (Number.isFinite(val)) scores.push({ col, val });
-    }
-    // ordenar por valor
-    scores.sort((a, b) => b.val - a.val);
-    const fortalezas = scores.slice(0, 3).map(s => `${s.col}: ${s.val} (${bucket(s.val)})`);
-    const mejoras    = scores.slice(-3).sort((a,b)=>a.val-b.val).map(s => `${s.col}: ${s.val} (${bucket(s.val)})`);
+    // Dominios que ya vienen promediados (los mostramos tal cual)
+    const DOMS = [
+      "PROMEDIO DE HABILIDADES INTRAPERSONALES",
+      "PROMEDIO DE HABILIDADES INTERPERSONALES",
+      "PROMEDIO DE HABILIDADES PARA LA VIDA",
+      "PROMEDIO DE INTELIGENCIA EMOCIONAL",
+    ].map(key);
 
-    // tabla de todas las métricas para el estudiante
-    const tablaAlumno = [];
-    for (const col of [...DOM_INDIVIDUALES, ...DOM_PROMEDIOS]) {
-      if (!columns.includes(col)) continue;
-      const val = toNum(student[col]);
-      tablaAlumno.push([col, Number.isFinite(val) ? val : "—", bucket(val)]);
-    }
+    // Habilidades base (scoring por alumno)
+    const HABS = [
+      "AUTOESTIMA",
+      "ASERTIVIDAD",
+      "CONCIENCIA DE LOS DEMÁS",
+      "EMPATÍA",
+      "MOTIVACIÓN",
+      "COMPROMISO",
+      "ADMINISTRACIÓN DEL TIEMPO",
+      "TOMA DE DECISIONES",
+      "LIDERAZGO",
+    ].map(key);
 
-    // promedios por cohorte (mismo CURSO/PARALELO)
-    const cohort = rows.filter(r => r.CURSO === curso && r.PARALELO === paralelo);
-    const tablaCohorte = [];
-    for (const col of [...DOM_INDIVIDUALES, ...DOM_PROMEDIOS]) {
-      if (!columns.includes(col)) continue;
-      const avg = mean(cohort.map(r => r[col]));
-      tablaCohorte.push([col, isNaN(avg) ? "—" : avg]);
-    }
+    // Datos del estudiante
+    const nombre = student[K.NOMBRE];
+    const curso = student[K.CURSO];
+    const paralelo = student[K.PARALELO];
+    const ie = toNum(student[K.IE]);
 
-    // IE global si existe columna (usa PROMEDIO DE INTELIGENCIA EMOCIONAL)
-    let ieGlobal = null;
-    if (columns.includes("PROMEDIO DE INTELIGENCIA EMOCIONAL")) {
-      const v = toNum(student["PROMEDIO DE INTELIGENCIA EMOCIONAL"]);
-      if (Number.isFinite(v)) ieGlobal = v;
-    }
+    // Fortalezas / Áreas
+    const pares = HABS
+      .filter(h => student[h] !== undefined && student[h] !== "")
+      .map(h => [h, toNum(student[h])])
+      .filter(([, v]) => Number.isFinite(v));
 
-    const general = [
-      `Reporte socioemocional de ${student.NOMBRE} (CURSO ${curso}, PARALELO ${paralelo}).`,
-      ieGlobal != null ? `Índice emocional global: ${ieGlobal} (${bucket(ieGlobal)}).` : "",
-      fortalezas.length ? `Fortalezas destacadas: ${fortalezas.join("; ")}.` : "",
-      mejoras.length ? `Áreas de oportunidad: ${mejoras.join("; ")}.` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
+    const fortalezas = pares.filter(([, v]) => v >= 71).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([h, v]) => `${h}: ${v} (${bucket(v)})`);
+    const mejoras = pares.filter(([, v]) => v <= 40).sort((a, b) => a[1] - b[1]).slice(0, 5).map(([h, v]) => `${h}: ${v} (${bucket(v)})`);
+
+    // Tabla de perfil
+    const perfilRows = pares
+      .sort((a, b) => b[1] - a[1])
+      .map(([h, v]) => [h, v, bucket(v)]);
+
+    // Tabla dominios
+    const domRows = DOMS
+      .map(d => [d, toNum(student[d]), bucket(toNum(student[d]))])
+      .filter(r => Number.isFinite(r[1]));
+
+    // Resumen general
+    const general = `Informe socioemocional de ${nombre} (CURSO ${curso}, PARALELO ${paralelo}). IE Global: ${Number(ie.toFixed(1))} (${bucket(ie)}).`;
+
+    const lists = [];
+    if (fortalezas.length) lists.push({ title: "Fortalezas destacadas", items: fortalezas });
+    if (mejoras.length) lists.push({ title: "Áreas de mejora prioritarias", items: mejoras });
 
     return res.json({
       ok: true,
       general,
-      lists: [
-        { title: "Fortalezas (Top 3)", items: fortalezas },
-        { title: "Áreas de mejora (Bottom 3)", items: mejoras },
-      ],
       tables: [
-        { title: `Perfil de ${student.NOMBRE}`, columns: ["Dominio", "Puntaje", "Rango"], rows: tablaAlumno },
-        { title: `Promedios del cohorte (CURSO ${curso} / PARALELO ${paralelo})`, columns: ["Dominio", "Promedio"], rows: tablaCohorte },
+        { title: "Perfil por Habilidad", columns: ["Habilidad", "Puntaje", "Rango"], rows: perfilRows },
+        { title: "Dominios", columns: ["Dominio", "Puntaje", "Rango"], rows: domRows },
       ],
+      lists,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ===== START =====
+// ---------- Arranque ----------
 app.listen(PORT, () => {
   console.log(`API ready on :${PORT}`);
 });
