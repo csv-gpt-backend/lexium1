@@ -58,6 +58,76 @@ app.use(
 
 // ====== Multer (subida en memoria; luego guardamos a disco) ======
 const upload = multer({ storage: multer.memoryStorage() });
+// === Helpers numéricos y CSV (nuevo) ===
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+// Carpeta de archivos (ajusta si tu servidor usa otra)
+const STORAGE_DIR = process.env.STORAGE_DIR || "/app/storage";
+
+// Convierte string -> número seguro (acepta coma decimal y limpia símbolos)
+function toNum(x) {
+  if (typeof x === "number") return Number.isFinite(x) ? x : NaN;
+  if (typeof x === "string") {
+    const y = x.trim()
+      .replace(",", ".")            // coma decimal → punto
+      .replace(/[^\d.+\-eE]/g, ""); // deja dígitos y signo/decimal/exponente
+    if (!y || y === "." || y === "+" || y === "-") return NaN;
+    const n = Number(y);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return NaN;
+}
+
+// Calcula promedio de colValor agrupado por colGrupo en 'rows' (array de objetos)
+function promedioPorGrupo(rows, colValor, colGrupo) {
+  const grupos = new Map(); // clave → array de números
+  for (const r of rows) {
+    const key = String(r[colGrupo] ?? "").trim();
+    const val = toNum(r[colValor]);
+    if (!key) continue;
+    if (!Number.isFinite(val)) continue; // ignora no numéricos
+    if (!grupos.has(key)) grupos.set(key, []);
+    grupos.get(key).push(val);
+  }
+  const salida = [];
+  for (const [k, arr] of grupos.entries()) {
+    if (!arr.length) continue;
+    const prom = arr.reduce((a,b)=>a+b,0) / arr.length;
+    salida.push([k, Number(prom.toFixed(1))]); // 1 decimal
+  }
+  // orden opcional por clave
+  salida.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
+  return salida;
+}
+
+// Lector CSV ligero (autodetecta ; o ,)
+async function readCsvLight(name) {
+  const full = path.join(STORAGE_DIR, name);
+  const raw = await fs.readFile(full, "utf8");
+  const text = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = text.split("\n").filter(l => l.trim() !== "");
+  if (!lines.length) return { columns: [], rows: [], delimiter: "," };
+
+  const first = lines[0];
+  const scoreSemicolon = first.split(";").length;
+  const scoreComma     = first.split(",").length;
+  const sep = scoreSemicolon > scoreComma ? ";" : ",";
+
+  const headers = first.split(sep).map(s => s.trim());
+  const rows = lines.slice(1).map(line => {
+    const cells = line.split(sep);
+    const obj   = {};
+    headers.forEach((h,i) => { obj[h] = (cells[i] ?? "").trim(); });
+    return obj;
+  });
+  return { columns: headers, rows, delimiter: sep };
+}
+// === FIN Helpers (nuevo) ===
 
 // ====== Utils de archivos ======
 function sanitizeName(name) {
@@ -240,22 +310,95 @@ app.get("/api/debug/csv", async (req, res) => {
 });
 
 // ====== /api/answer ======
+// ---- /api/answer ----
+// Responde tanto TXT ("explica ... según evaluacion.txt")
+// como CSV ("promedio de AUTOESTIMA por PARALELO según decimo.csv")
 app.get("/api/answer", async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  if (!q) return res.status(400).json({ ok: false, error: "missing_q" });
-
   try {
-    if (q.toLowerCase().includes(".csv")) {
-      const ans = await answerCsv(q);
-      return res.json(ans);
-    } else if (q.toLowerCase().includes(".txt")) {
-      const ans = await answerTxt(q);
-      return res.json(ans);
+    const q = String(req.query.q || "").trim();
+
+    // --- Caso CSV: "promedio de X por Y según archivo.csv"
+    const rxCsv = /promedio\s+de\s+(.+?)\s+por\s+(.+?)\s+seg[uú]n\s+(.+?\.csv)/i;
+    const mmCsv = q.match(rxCsv);
+    if (mmCsv) {
+      const colValor = mmCsv[1].trim();
+      const colGrupo = mmCsv[2].trim();
+      const fileCsv  = mmCsv[3].trim();
+
+      // lee CSV (autodetecta ; o ,)
+      const { columns, rows, delimiter } = await readCsvLight(fileCsv);
+
+      if (!rows.length) {
+        return res.json({
+          ok: true,
+          general: `No se encontraron filas en ${fileCsv}.`,
+          lists: [],
+          tables: []
+        });
+      }
+
+      // intenta localizar columnas ignorando mayúsculas/minúsculas y espacios
+      const norm = s => String(s).trim().toUpperCase();
+      const colValorReal = columns.find(c => norm(c) === norm(colValor)) || colValor;
+      const colGrupoReal = columns.find(c => norm(c) === norm(colGrupo)) || colGrupo;
+
+      const outRows = promedioPorGrupo(rows, colValorReal, colGrupoReal);
+
+      if (!outRows.length) {
+        return res.json({
+          ok: true,
+          general: `No se encontraron valores numéricos para calcular el promedio de '${colValorReal}' por '${colGrupoReal}' en ${fileCsv}.`,
+          lists: [],
+          tables: []
+        });
+      }
+
+      return res.json({
+        ok: true,
+        general: `Promedio de ${colValorReal} por ${colGrupoReal} usando '${fileCsv}' (delimitador '${delimiter}').`,
+        lists: [],
+        tables: [{
+          title: `Promedio de ${colValorReal} por ${colGrupoReal}`,
+          columns: [colGrupoReal, `Promedio ${colValorReal}`],
+          rows: outRows
+        }]
+      });
     }
-    // si no especifica archivo, responde básico
-    return res.json({ ok: true, general: "Indica el archivo, por ejemplo: 'promedio de AUTOESTIMA por Paralelo según decimo.csv'." });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+
+    // --- Caso TXT: "explica ... según archivo.txt"
+    const rxTxt = /(explica|resumen|resume|defin[eí]ne)\b.*seg[uú]n\s+(.+?\.txt)/i;
+    const mmTxt = q.match(rxTxt);
+    if (mmTxt) {
+      const fileTxt = mmTxt[2].trim();
+      const full    = path.join(STORAGE_DIR, fileTxt);
+      const text    = await fs.readFile(full, "utf8");
+
+      // mini "resumen": primeras 6 líneas no vacías
+      const lines = text.replace(/\r\n/g,"\n").split("\n").map(s=>s.trim()).filter(Boolean);
+      const pick  = lines.slice(0, 6);
+
+      return res.json({
+        ok: true,
+        general: pick.join(" "),
+        lists: pick.length ? [{
+          title: `Puntos clave según ${fileTxt}`,
+          items: pick
+        }] : [],
+        tables: []
+      });
+    }
+
+    // fallback si la pregunta no encaja con patrones conocidos
+    return res.json({
+      ok: true,
+      general: "Pregunta recibida, pero no identifiqué un patrón soportado. Intenta por ejemplo:\n- promedio de AUTOESTIMA por PARALELO según decimo.csv\n- explica la asertividad según evaluacion.txt",
+      lists: [],
+      tables: []
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok:false, error: String(err?.message || err) });
   }
 });
 
