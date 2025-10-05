@@ -212,71 +212,130 @@ app.get("/api/students", async (req,res)=>{
 });
 
 // ===== /api/answer: consultas generales =====
+// ===== /api/answer: consultas generales (sin exigir "según decimo.csv") =====
 app.get("/api/answer", async (req, res) => {
   try{
     const q = String(req.query.q||"").trim();
     const nq = norm(q);
+
     const { rows, columns } = await loadCSV("decimo.csv");
-    if (!rows.length) return res.json({ ok:true, general:"No hay filas en decimo.csv.", lists:[], tables:[] });
+    if (!rows.length) {
+      return res.json({ ok:true, general:"No hay filas en decimo.csv.", lists:[], tables:[] });
+    }
 
+    // utilidades
     const colByNorm = {}; columns.forEach(h => colByNorm[norm(h)] = h);
+    const has = (...tokens) => tokens.some(t => nq.includes(norm(t)));
 
-    // 1) muestra N filas
-    if (/muestra\s+\d+\s+filas/.test(nq) && nq.includes("decimo csv")){
+    // Detectar métrica mencionada (si el usuario la nombra)
+    let measure = columns.find(h => nq.includes(norm(h)));
+    // Si no la nombra, intenta una razonable por defecto
+    if (!measure) {
+      measure = colByNorm[norm("PROMEDIO DE INTELIGENCIA EMOCIONAL")]
+             || colByNorm[norm("AUTOESTIMA")]
+             || columns.find(h => Number.isFinite(toNum(rows[0]?.[h])))
+             || columns[0];
+    }
+
+    const nameKey = colByNorm[norm("NOMBRE")] || "NOMBRE";
+    const parKey  = colByNorm[norm("PARALELO")] || "PARALELO";
+    const cursoKey= colByNorm[norm("CURSO")]   || "CURSO";
+
+    // ========== 1) "muestra N filas" ==========
+    {
       const m = nq.match(/muestra\s+(\d+)\s+filas/);
-      const n = Math.max(1, Math.min(50, parseInt(m?.[1]||"3",10)));
-      const subsetCols = ["NOMBRE","CURSO","PARALELO","AUTOESTIMA"].map(c=>colByNorm[norm(c)]||c);
-      const sample = rows.slice(0,n).map(r => subsetCols.map(c=>r[c]));
-      return res.json({ ok:true, general:`Primeras ${n} filas de decimo.csv.`, tables:[{title:"Muestra", columns:subsetCols, rows:sample}], lists:[] });
-    }
-
-    // 2) promedio de X por grupo
-    if (nq.includes("promedio") && nq.includes("segun decimo csv")){
-      // detecta medida mencionada
-      let measure = columns.find(h => nq.includes(norm(h))) || "AUTOESTIMA";
-      let groupKey = null;
-      if (nq.includes("por paralelo")) groupKey = colByNorm[norm("PARALELO")] || "PARALELO";
-      else if (nq.includes("por curso")) groupKey = colByNorm[norm("CURSO")] || "CURSO";
-      else if (nq.includes("por global") || nq.includes("global")){
-        const avg = mean(rows.map(r => r[measure]));
-        return res.json({ ok:true, general:`Promedio global de ${measure}.`, tables:[{title:"Global", columns:["Métrica","Promedio"], rows:[[measure, isNaN(avg)?"—":avg]]}], lists:[] });
+      if (m) {
+        const n = Math.max(1, Math.min(50, parseInt(m[1],10)));
+        const subsetCols = [nameKey, cursoKey, parKey, measure].filter(Boolean);
+        const sample = rows.slice(0,n).map(r => subsetCols.map(c=>r[c]));
+        return res.json({
+          ok:true,
+          general:`Primeras ${n} filas.`,
+          tables:[{title:"Muestra", columns:subsetCols, rows:sample}],
+          lists:[]
+        });
       }
-      if (!groupKey) return res.json({ ok:true, general:"Indica si es por CURSO o por PARALELO.", lists:[], tables:[] });
-      const groups = by(rows, groupKey);
-      const trows = [];
-      for (const [gkey, arr] of groups) trows.push([gkey, isNaN(mean(arr.map(r=>r[measure])))?"—":mean(arr.map(r=>r[measure]))]);
-      trows.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
-      return res.json({ ok:true, general:`Promedio de ${measure} por ${groupKey}.`, tables:[{title:`${groupKey}`, columns:[groupKey,"Promedio"], rows:trows}], lists:[] });
     }
 
-    // 3) top N ↑/↓
-    if (nq.includes("top") && nq.includes("segun decimo csv")){
-      const mm = nq.match(/top\s+(\d+)/); const k = mm ? Math.max(1, Math.min(50, parseInt(mm[1],10))) : 5;
-      const desc = (nq.includes("mas alta") || nq.includes("más alta")); const asc = (nq.includes("mas baja") || nq.includes("más baja"));
-      const measure = columns.find(h => nq.includes(norm(h))) || "AUTOESTIMA";
-      const nameKey = colByNorm[norm("NOMBRE")] || "NOMBRE";
-      const parKey  = colByNorm[norm("PARALELO")] || "PARALELO";
-      const data = rows.map(r => [r[nameKey], r[parKey], toNum(r[measure])]).filter(x => Number.isFinite(x[2]));
-      data.sort((a,b)=> desc ? b[2]-a[2] : asc ? a[2]-b[2] : b[2]-a[2]);
-      return res.json({ ok:true, general:`Top ${k} por ${measure} (${desc?"más alta":asc?"más baja":"ordenado"})`, tables:[{title:"Top", columns:[nameKey, parKey, measure], rows:data.slice(0,k)}], lists:[] });
+    // ========== 2) "promedio de X por PARALELO|CURSO|Global" ==========
+    if (has("promedio")) {
+      // ¿por qué agrupamos?
+      let groupKey = null;
+      if (has("por paralelo")) groupKey = parKey;
+      if (has("por curso"))    groupKey = cursoKey;
+
+      // Global
+      if (has("global") || (!groupKey && !has("por"))) {
+        const avg = mean(rows.map(r => r[measure]));
+        return res.json({
+          ok:true,
+          general:`Promedio global de ${measure}.`,
+          tables:[{title:"Global", columns:["Métrica","Promedio"], rows:[[measure, isNaN(avg)?"—":avg]]}],
+          lists:[]
+        });
+      }
+
+      // Agrupado
+      if (groupKey) {
+        const groups = by(rows, groupKey);
+        const trows = [];
+        for (const [gkey, arr] of groups) {
+          trows.push([gkey, isNaN(mean(arr.map(r=>r[measure])))?"—":mean(arr.map(r=>r[measure]))]);
+        }
+        trows.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
+        return res.json({
+          ok:true,
+          general:`Promedio de ${measure} por ${groupKey}.`,
+          tables:[{title:`${groupKey}`, columns:[groupKey,"Promedio"], rows:trows}],
+          lists:[]
+        });
+      }
+      // Si dijo "promedio" pero no especificó grupo, ya devolvimos global arriba.
     }
 
-    // 4) TXT
-    if (nq.includes("segun") && (nq.includes("emocionales txt") || nq.includes("evaluacion txt") || nq.includes("ubicacion txt"))){
+    // ========== 3) "top N ... más alta / más baja" ==========
+    if (nq.includes("top")) {
+      const mm = nq.match(/top\s+(\d+)/); 
+      const k = mm ? Math.max(1, Math.min(50, parseInt(mm[1],10))) : 5;
+      const desc = (has("más alta","mas alta","mayor","maximo","máximo"));
+      const asc  = (has("más baja","mas baja","menor","minimo","mínimo"));
+
+      const data = rows
+        .map(r => [r[nameKey], r[parKey], toNum(r[measure])])
+        .filter(x => Number.isFinite(x[2]));
+
+      data.sort((a,b)=> desc ? (b[2]-a[2]) : asc ? (a[2]-b[2]) : (b[2]-a[2]));
+
+      return res.json({
+        ok:true,
+        general:`Top ${k} por ${measure} ${desc?"(más alta)":asc?"(más baja)":""}.`,
+        tables:[{title:"Top", columns:[nameKey, parKey, measure], rows:data.slice(0,k)}],
+        lists:[]
+      });
+    }
+
+    // ========== 4) TXT: explica … según archivo ==========
+    if (has("segun","según") && (has("emocionales txt") || has("evaluacion txt") || has("ubicacion txt"))) {
       let fname = "emocionales.txt";
-      if (nq.includes("evaluacion txt")) fname = "evaluacion.txt";
-      if (nq.includes("ubicacion txt")) fname = "ubicacion.txt";
+      if (has("evaluacion txt")) fname = "evaluacion.txt";
+      if (has("ubicacion txt"))  fname = "ubicacion.txt";
       const txt = await readText(fname);
       if (!txt) return res.json({ ok:true, general:`No encontré ${fname} en storage.`, lists:[], tables:[] });
       return res.json({ ok:true, general: txt.slice(0,1200) + (txt.length>1200 ? " …" : ""), lists:[], tables:[] });
     }
 
-    // fallback
-    return res.json({ ok:true, general:"Pregunta recibida. Ejemplos: “reporte completo de Castillo D Julia”, “top 5 con AUTOESTIMA más baja según decimo.csv”, “promedio de ASERTIVIDAD por PARALELO según decimo.csv”.", lists:[], tables:[] });
+    // ========== Fallback mejorado ==========
+    return res.json({
+      ok:true,
+      general:"No entendí del todo. Ejemplos: “reporte completo de Castillo D Julia”, “top 5 estudiantes con AUTOESTIMA más baja”, “promedio de ASERTIVIDAD por PARALELO”, “muestra 5 filas”.",
+      lists:[],
+      tables:[]
+    });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
+
 
 // ===== /api/report: perfil completo de un estudiante =====
 app.get("/api/report", async (req, res) => {
