@@ -6,7 +6,7 @@
 <title>Asistente Lexium</title>
 <style>
   :root{ --bg:#fff; --fg:#111; --muted:#6b7280; --pri:#0d6efd; --bd:#e5e7eb; }
-  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
   .wrap{max-width:1180px;margin:0 auto;padding:12px;}
   .hero{position:sticky;top:0;background:#fff;z-index:5;padding-top:4px;}
   .heroGrid{display:grid;grid-template-columns:1fr 3fr 1fr;align-items:center;gap:8px;}
@@ -26,18 +26,20 @@
   th,td{border:1px solid var(--bd);padding:8px}
   th{background:#f8fafc;text-align:left}
   .muted{color:var(--muted);font-size:.9rem}
-  .chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:10px 0}
-  .chip{border:1px solid var(--bd);padding:6px 10px;border-radius:999px;cursor:pointer;background:#fff}
-  .chip:hover{background:#f5f7fb}
+  .status{font-size:.9rem;margin-top:4px}
+  .ok{color:#16a34a}
+  .bad{color:#b91c1c}
 </style>
 </head>
 <body>
 <div class="wrap">
 
+  <!-- botón Historial (arriba derecha) -->
   <div class="hist">
     <button id="btnHist" title="Ver sesiones guardadas">Historial</button>
   </div>
 
+  <!-- Bloque superior fijo -->
   <div class="hero" aria-label="cabecera">
     <div class="heroGrid">
       <div class="sideImg">
@@ -51,8 +53,10 @@
       </div>
     </div>
 
+    <!-- Caja de texto + barra de acciones -->
     <div style="margin:8px 0">
-      <textarea id="q" class="query" rows="2" placeholder="Escribe tu pregunta (ej.: reporte completo de Castillo D Julia; top 5 con AUTOESTIMA más baja; promedio de ASERTIVIDAD por PARALELO)"></textarea>
+      <textarea id="q" class="query" rows="2" placeholder="Escribe tu pregunta (ej: reporte completo de Castillo D Julia; promedio de ASERTIVIDAD por paralelo; top 5 en IE global; percentil de Patiño G Olivia en COMPROMISO)"></textarea>
+      <div id="status" class="status muted">Comprobando backend…</div>
     </div>
 
     <div class="toolbar">
@@ -69,11 +73,9 @@
         <option value="doc">DOC</option>
       </select>
     </div>
-
-    <!-- chips de ejemplo -->
-    <div class="chips" id="chips"></div>
   </div>
 
+  <!-- Resultado -->
   <div id="out" class="out" aria-live="polite"></div>
   <div class="muted">La respuesta se genera estrictamente usando el CSV y los TXT cargados en tu backend.</div>
 
@@ -81,9 +83,9 @@
 
 <script>
 /* ====== CONFIG ====== */
-const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev"; // ← TU URL DE FLY
-const PATH_ANSWER = "/api/answer";
-const PATH_REPORT = "/api/report";
+const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev"; // ← tu API en Fly
+const ANSWER_PATH = "/api/answer";
+const REPORT_PATH = "/api/report";
 
 /* ====== UI refs ====== */
 const q = document.getElementById("q");
@@ -97,8 +99,9 @@ const btnNew = document.getElementById("btnNew");
 const btnClear = document.getElementById("btnClear");
 const selExport = document.getElementById("selExport");
 const btnHist = document.getElementById("btnHist");
+const statusEl = document.getElementById("status");
 
-/* ====== Estado voz/video ====== */
+/* ====== Estado de voz/video ====== */
 let voices = [];
 let currentVoice = null;
 let speaking = false;
@@ -107,6 +110,7 @@ let lastSpokenText = "";
 let resumeIndex = 0;
 let recognizer = null;
 
+/* ====== Voz: elegir femenina español ====== */
 function pickSpanishFemale(){
   voices = window.speechSynthesis.getVoices();
   const es = voices.filter(v=>/^es(-|_)/i.test(v.lang));
@@ -118,6 +122,7 @@ if (typeof speechSynthesis !== "undefined") {
   window.speechSynthesis.onvoiceschanged = pickSpanishFemale;
 }
 
+/* ====== Hablar con reanudación ====== */
 function speak(text, fromIndex=0){
   if (!text) return;
   lastSpokenText = text;
@@ -133,16 +138,29 @@ function speak(text, fromIndex=0){
   window.speechSynthesis.speak(u);
 }
 function toggleAV(){
-  if (speaking && !paused){ window.speechSynthesis.pause(); paused = true; vid.pause(); }
-  else if (speaking && paused){ window.speechSynthesis.resume(); paused = false; vid.play().catch(()=>{}); }
-  else { speak(lastSpokenText, resumeIndex); }
+  if (speaking && !paused){
+    window.speechSynthesis.pause();
+    paused = true;
+    vid.pause();
+  } else if (speaking && paused){
+    window.speechSynthesis.resume();
+    paused = false;
+    vid.play().catch(()=>{});
+  } else {
+    speak(lastSpokenText, resumeIndex);
+  }
 }
-function replay(){ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); speak(lastSpokenText, 0); }
+function replay(){
+  if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+  speak(lastSpokenText, 0);
+}
 
 /* ====== Render ====== */
 function renderAnswer(data){
   let html = "";
-  if (data.general) { html += `<p>${escapeHtml(data.general).replace(/\n/g,"<br>")}</p>`; }
+  if (data.general) {
+    html += `<p>${escapeHtml(data.general).replace(/\n/g,"<br>")}</p>`;
+  }
   (data.lists||[]).forEach(l=>{
     html += `<h3>${escapeHtml(l.title||"Lista")}</h3><ol>`;
     (l.items||[]).forEach(it=> html += `<li>${escapeHtml(it)}</li>`);
@@ -160,28 +178,33 @@ function renderAnswer(data){
     html += `</tbody></table>`;
   });
   out.innerHTML = html || "<em>Sin contenido.</em>";
-  if (data.general) { if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); speak(data.general, 0); }
-}
-function escapeHtml(x){return x.replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
 
-/* ====== Ask ====== */
+  if (data.general) {
+    if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+    speak(data.general, 0);
+  }
+}
+function escapeHtml(x){return String(x).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
+
+/* ====== Enviar a backend ====== */
 async function ask(){
   const text = q.value.trim();
   if (!text) return;
-  out.innerHTML = "…consultando…";
-  const useReport = /reporte\s+completo\s+de\s+/i.test(text);
-  const url = `${API_BASE}${useReport?PATH_REPORT:PATH_ANSWER}?q=${encodeURIComponent(text)}&t=${Date.now()}`;
   try{
-    const r = await fetch(url, { headers:{Accept:"application/json"}, cache: "no-store" });
-    const data = await r.json();
+    const isReport = /reporte\s+completo\s+de\s+/i.test(text);
+    const path = isReport ? REPORT_PATH : ANSWER_PATH;
+    const url = `${API_BASE}${path}?q=${encodeURIComponent(text)}`;
+    const r = await fetch(url, { headers:{Accept:"application/json"} });
+    let data;
+    try { data = await r.json(); } catch(e){ throw new Error(`Respuesta no JSON (${r.status})`); }
     if (!r.ok || !data.ok) {
-      out.innerHTML = `<pre style="color:#b91c1c">${(data && (data.error||data.general)) || r.statusText}</pre>`;
+      out.innerHTML = `<pre style="color:#b91c1c">${escapeHtml((data && (data.error||data.general)) || r.statusText || "Error")}</pre>`;
       return;
     }
     saveSession(text, data);
     renderAnswer(data);
   }catch(e){
-    out.innerHTML = `<pre style="color:#b91c1c">${e}</pre>`;
+    out.innerHTML = `<pre style="color:#b91c1c">${escapeHtml(String(e))}</pre>`;
   }
 }
 
@@ -203,7 +226,7 @@ function toggleDict(){
   else { recognizer.start(); recognizer.listening=true; btnDict.textContent="⏹ Detener dictado"; }
 }
 
-/* ====== Historial local ====== */
+/* ====== Sesiones (historial localStorage) ====== */
 function saveSession(question, data){
   const key = "lexium_sessions";
   const all = JSON.parse(localStorage.getItem(key) || "[]");
@@ -230,14 +253,15 @@ function openHistory(){
   w.document.write(html); w.document.close();
 }
 
-/* ====== Export ====== */
+/* ====== Exportar ====== */
 selExport.addEventListener("change", ()=>{
   const v = selExport.value; selExport.value="";
   if (!out.innerHTML.trim()){ alert("No hay contenido que exportar."); return; }
-  if (v==="pdf"){
+  if (v==="pdf"){ // vista previa
     const w = window.open("","_blank");
     w.document.write(`<html><head><title>Export PDF</title></head><body>${out.innerHTML}</body></html>`);
-    w.document.close(); w.focus(); w.print();
+    w.document.close();
+    w.focus(); w.print();
   } else if (v==="xls" || v==="doc"){
     const mime = v==="xls" ? "application/vnd.ms-excel" : "application/msword";
     const blob = new Blob([`<html><body>${out.innerHTML}</body></html>`], {type:mime});
@@ -249,6 +273,24 @@ selExport.addEventListener("change", ()=>{
   }
 });
 
+/* ====== Ping inicial ====== */
+async function ping(){
+  try{
+    const r = await fetch(`${API_BASE}/api/ping`);
+    const data = await r.json();
+    if (r.ok && data.ok){
+      statusEl.innerHTML = `Backend: <span class="ok">OK</span> (región: ${escapeHtml(String(data.region||"?"))})`;
+      statusEl.classList.remove("bad"); statusEl.classList.add("ok");
+    } else {
+      statusEl.innerHTML = `Backend: <span class="bad">Error</span>`;
+      statusEl.classList.remove("ok"); statusEl.classList.add("bad");
+    }
+  }catch{
+    statusEl.innerHTML = `Backend: <span class="bad">Sin conexión</span>`;
+    statusEl.classList.remove("ok"); statusEl.classList.add("bad");
+  }
+}
+
 /* ====== Eventos ====== */
 btnSend.addEventListener("click", ask);
 btnDict.addEventListener("click", toggleDict);
@@ -257,23 +299,11 @@ btnReplay.addEventListener("click", replay);
 btnHist.addEventListener("click", openHistory);
 btnClear.addEventListener("click", ()=>{ q.value=""; out.innerHTML=""; if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); });
 btnNew.addEventListener("click", ()=>{ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); q.value=""; out.innerHTML=""; });
+
 q.addEventListener("keydown", e=>{ if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) ask(); });
 
-/* ====== Chips de ejemplo ====== */
-const examples = [
-  "reporte completo de Castillo D Julia",
-  "top 5 estudiantes con AUTOESTIMA más baja según decimo.csv",
-  "promedio de ASERTIVIDAD por PARALELO según decimo.csv",
-  "muestra 5 filas de decimo.csv",
-  "explica la ASERTIVIDAD según emocionales.txt"
-];
-const chips = document.getElementById("chips");
-examples.forEach(txt=>{
-  const b = document.createElement("button");
-  b.className = "chip"; b.textContent = txt;
-  b.onclick = ()=>{ q.value = txt; ask(); };
-  chips.appendChild(b);
-});
+/* start */
+ping();
 </script>
 </body>
 </html>
