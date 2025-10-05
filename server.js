@@ -1,547 +1,295 @@
-// server.js (ESM)
-// Node 18/20 compatible
-
+// server.js  (ESM)
 import express from "express";
 import cors from "cors";
-import multer from "multer";
 import path from "path";
-import fs from "fs";
-import fsp from "fs/promises";
 import { fileURLToPath } from "url";
+import { promises as fs } from "fs";          // ← ÚNICA importación de fs (promises)
+import formidable from "formidable";
 
-// ====== Config básica ======
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ---------- Config ----------
 const PORT = process.env.PORT || 8080;
-const STORAGE_DIR = path.join(process.cwd(), "storage"); // en Fly => /app/storage
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "lexium123";
-
-// CORS: lista separada por comas o "*"
-const RAW_ORIGINS = (process.env.CORS_ORIGINS || "").trim();
-const ALLOW_WILDCARD_VERCEL = RAW_ORIGINS.includes("*.vercel.app");
-const ALLOWED_ORIGINS = RAW_ORIGINS
+const STORAGE = process.env.STORAGE_DIR || "/app/storage";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || "*")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-// asegúrate que exista la carpeta de almacenamiento
-await fsp.mkdir(STORAGE_DIR, { recursive: true });
+// asegurar storage
+await fs.mkdir(STORAGE, { recursive: true });
 
-// ====== Helpers de CORS ======
-function isAllowedOrigin(origin) {
-  if (!origin) return true; // Hoppscotch / file://
-  if (RAW_ORIGINS === "*" || ALLOWED_ORIGINS.includes(origin)) return true;
-  if (ALLOW_WILDCARD_VERCEL && /\.vercel\.app$/.test(new URL(origin).hostname)) {
-    return true;
-  }
-  return false;
+// ---------- CORS ----------
+function originOk(origin) {
+  if (!origin) return true;               // fetch desde mismo origen / curl
+  if (CORS_ORIGINS.includes("*")) return true;
+  return CORS_ORIGINS.some(pat => {
+    if (pat.endsWith("*")) {
+      const base = pat.slice(0, -1);
+      return origin.startsWith(base);
+    }
+    return origin === pat;
+  });
 }
-
 const app = express();
+app.use((req, res, next) => {
+  cors({
+    origin: (origin, cb) => cb(originOk(origin) ? null : new Error("CORS"), true),
+    credentials: false
+  })(req, res, next);
+});
 app.use(express.json());
 
-// CORS dinámico
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      try {
-        if (isAllowedOrigin(origin)) return cb(null, true);
-        return cb(new Error("CORS blocked"));
-      } catch {
-        return cb(new Error("CORS error"));
-      }
-    },
-    credentials: false,
-  })
-);
+// ---------- Utils ----------
+const requireAdmin = (req, res, next) => {
+  if (!ADMIN_TOKEN) return res.status(500).json({ ok: false, error: "admin_token_not_set" });
+  const t = req.header("x-admin-token") || "";
+  if (t !== ADMIN_TOKEN) return res.status(403).json({ ok: false, error: "forbidden" });
+  next();
+};
 
-// ====== Multer (subida en memoria; luego guardamos a disco) ======
-const upload = multer({ storage: multer.memoryStorage() });
-// === Helpers numéricos y CSV (nuevo) ===
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+const safeBase = name => path.basename(name || "").replace(/\.\.+/g, ".");
+const filePath = name => path.join(STORAGE, safeBase(name));
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-
-// Carpeta de archivos (ajusta si tu servidor usa otra)
-const STORAGE_DIR = process.env.STORAGE_DIR || "/app/storage";
-
-// Convierte string -> número seguro (acepta coma decimal y limpia símbolos)
-function toNum(x) {
-  if (typeof x === "number") return Number.isFinite(x) ? x : NaN;
-  if (typeof x === "string") {
-    const y = x.trim()
-      .replace(",", ".")            // coma decimal → punto
-      .replace(/[^\d.+\-eE]/g, ""); // deja dígitos y signo/decimal/exponente
-    if (!y || y === "." || y === "+" || y === "-") return NaN;
-    const n = Number(y);
-    return Number.isFinite(n) ? n : NaN;
-  }
-  return NaN;
-}
-
-// Calcula promedio de colValor agrupado por colGrupo en 'rows' (array de objetos)
-function promedioPorGrupo(rows, colValor, colGrupo) {
-  const grupos = new Map(); // clave → array de números
-  for (const r of rows) {
-    const key = String(r[colGrupo] ?? "").trim();
-    const val = toNum(r[colValor]);
-    if (!key) continue;
-    if (!Number.isFinite(val)) continue; // ignora no numéricos
-    if (!grupos.has(key)) grupos.set(key, []);
-    grupos.get(key).push(val);
-  }
-  const salida = [];
-  for (const [k, arr] of grupos.entries()) {
-    if (!arr.length) continue;
-    const prom = arr.reduce((a,b)=>a+b,0) / arr.length;
-    salida.push([k, Number(prom.toFixed(1))]); // 1 decimal
-  }
-  // orden opcional por clave
-  salida.sort((a,b)=> String(a[0]).localeCompare(String(b[0])));
-  return salida;
-}
-
-// Lector CSV ligero (autodetecta ; o ,)
-async function readCsvLight(name) {
-  const full = path.join(STORAGE_DIR, name);
-  const raw = await fs.readFile(full, "utf8");
-  const text = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = text.split("\n").filter(l => l.trim() !== "");
-  if (!lines.length) return { columns: [], rows: [], delimiter: "," };
-
-  const first = lines[0];
-  const scoreSemicolon = first.split(";").length;
-  const scoreComma     = first.split(",").length;
-  const sep = scoreSemicolon > scoreComma ? ";" : ",";
-
-  const headers = first.split(sep).map(s => s.trim());
-  const rows = lines.slice(1).map(line => {
-    const cells = line.split(sep);
-    const obj   = {};
-    headers.forEach((h,i) => { obj[h] = (cells[i] ?? "").trim(); });
-    return obj;
-  });
-  return { columns: headers, rows, delimiter: sep };
-}
-// === FIN Helpers (nuevo) ===
-
-// ====== Utils de archivos ======
-function sanitizeName(name) {
-  return String(name || "")
-    .replace(/[/\\?%*:|"<>]/g, "_")
-    .trim();
-}
-async function listFiles() {
-  const all = await fsp.readdir(STORAGE_DIR, { withFileTypes: true });
-  return all
-    .filter(d => d.isFile())
-    .map(d => d.name)
-    .sort();
-}
-async function fileExists(p) {
-  try {
-    await fsp.access(p, fs.constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ====== CSV: parser simple con autodetección de delimitador ======
-function detectDelimiter(raw) {
-  const head = raw.slice(0, 2000);
-  const semis = (head.match(/;/g) || []).length;
-  const commas = (head.match(/,/g) || []).length;
-  return semis > commas ? ";" : ",";
-}
-
-function parseCsvLine(line, delim) {
-  // Parser básico con comillas: "campo;con;delim"
+// dividir línea CSV con comillas
+function splitCSVLine(line, delimiter) {
   const out = [];
-  let cur = "";
-  let inQuotes = false;
-
+  let cur = "", q = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-
     if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"'; // escapado ""
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === delim && !inQuotes) {
-      out.push(cur);
-      cur = "";
-    } else {
-      cur += ch;
-    }
+      if (q && line[i + 1] === '"') { cur += '"'; i++; }
+      else q = !q;
+    } else if (ch === delimiter && !q) {
+      out.push(cur); cur = "";
+    } else cur += ch;
   }
   out.push(cur);
   return out;
 }
 
-function parseCsvSimple(raw) {
-  const delim = detectDelimiter(raw);
-  const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
-  if (!lines.length) return { headers: [], rows: [] };
-
-  // encabezados (quita BOM)
-  const first = lines[0].replace(/^\uFEFF/, "");
-  const headers = parseCsvLine(first, delim).map(h => h.trim());
-
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cells = parseCsvLine(lines[i], delim);
-    if (!cells.length) continue;
+// parse CSV (soporta ; o ,  y comillas)
+function parseCSV(text, delimiter = ";") {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);   // BOM
+  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = text.split("\n").filter(l => l.trim().length);
+  if (lines.length === 0) return { headers: [], rows: [] };
+  const headersRaw = splitCSVLine(lines[0], delimiter);
+  const headers = headersRaw.map(h => h.replace(/^"|"$/g, "").trim());
+  const rows = lines.slice(1).map(line => {
+    const cols = splitCSVLine(line, delimiter);
     const obj = {};
-    for (let j = 0; j < headers.length; j++) {
-      obj[headers[j]] = (cells[j] ?? "").trim();
-    }
-    rows.push(obj);
-  }
-  return { headers, rows, delim };
+    headers.forEach((h, i) => {
+      let v = cols[i] ?? "";
+      if (/^".*"$/.test(v)) v = v.slice(1, -1).replace(/""/g, '"');
+      obj[h] = v;
+    });
+    return obj;
+  });
+  return { headers, rows };
 }
 
-// normaliza: mayúsculas, sin tildes, sin dobles espacios
-function norm(s) {
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toUpperCase();
+// detección de delimitador y lectura completa
+async function loadCSV(name) {
+  const full = await fs.readFile(filePath(name), "utf8");
+  const first = (full.split(/\r?\n/).find(l => l.trim()) || "");
+  const cntSemi = (first.match(/;/g) || []).length;
+  const cntComma = (first.match(/,/g) || []).length;
+  const delimiter = cntSemi >= cntComma ? ";" : ",";
+  const parsed = parseCSV(full, delimiter);
+  return { ...parsed, delimiter, count: parsed.rows.length };
 }
 
-function numeric(v) {
-  const n = Number(String(v).replace(",", "."));
-  return Number.isFinite(n) ? n : null;
+// convertir texto a número (soporta “80”, “80,5”, “80.5”)
+function toNumber(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  if (typeof v !== "string") return NaN;
+  // quita espacios y caracteres no numéricos salvo coma/punto/signo
+  let t = v.trim().replace(/[^\d,.\-+]/g, "");
+  // si hay coma y no punto, usa coma como decimal
+  if (t.includes(",") && !t.includes(".")) t = t.replace(",", ".");
+  const n = Number(t);
+  return Number.isFinite(n) ? n : NaN;
 }
 
-// ====== Endpoints básicos ======
-app.get("/", (_req, res) => {
-  res.type("text/plain").send("Lexium API OK");
-});
-
+// ---------- Rutas ----------
 app.get("/api/ping", (req, res) => {
   res.json({ ok: true, pong: "🏓", region: process.env.FLY_REGION || null });
 });
 
-// ====== Gestión de archivos ======
+// lista archivos en /storage
 app.get("/api/files", async (req, res) => {
   try {
-    // si quieres proteger también el GET, descomenta:
-    // if (ADMIN_TOKEN && req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-    //   return res.status(403).json({ ok:false, error:"forbidden" });
-    // }
-    const names = await listFiles();
-    res.json({ ok: true, files: names });
+    const all = await fs.readdir(STORAGE);
+    res.json({ ok: true, files: all.sort() });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-app.post("/api/files/upload", upload.array("files"), async (req, res) => {
-  try {
-    if (ADMIN_TOKEN && req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return res.status(403).json({ ok: false, error: "forbidden" });
+// subir archivos (multipart) – clave: "files"
+app.post("/api/files/upload", requireAdmin, (req, res) => {
+  const form = formidable({
+    multiples: true,
+    uploadDir: STORAGE,
+    keepExtensions: true,
+    filename: (name, ext, part) => safeBase(part.originalFilename || part.newFilename || name + ext)
+  });
+
+  form.parse(req, async (err, fields, files) => {
+    try {
+      if (err) return res.status(400).json({ ok: false, error: String(err.message || err) });
+      const picked = files.files;
+      const arr = Array.isArray(picked) ? picked : (picked ? [picked] : []);
+      const saved = [];
+      for (const f of arr) {
+        if (!f) continue;
+        const tmp = f.filepath || f.path; // v3/v2 compat
+        const fin = filePath(f.originalFilename || f.newFilename || f.name);
+        try { await fs.rename(tmp, fin); }
+        catch {
+          await fs.copyFile(tmp, fin);
+          await fs.unlink(tmp).catch(() => {});
+        }
+        saved.push(path.basename(fin));
+      }
+      res.json({ ok: true, files: saved });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
     }
-    const files = req.files || [];
-    if (!files.length) {
-      return res.status(400).json({ ok: false, error: "no_files" });
-    }
-    const saved = [];
-    for (const f of files) {
-      const clean = sanitizeName(f.originalname);
-      const dest = path.join(STORAGE_DIR, clean);
-      await fsp.writeFile(dest, f.buffer);
-      saved.push(clean);
-    }
-    res.json({ ok: true, files: saved });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
+  });
 });
 
-app.delete("/api/files", async (req, res) => {
+// borrar archivo por nombre
+app.delete("/api/files", requireAdmin, async (req, res) => {
   try {
-    if (ADMIN_TOKEN && req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return res.status(403).json({ ok: false, error: "forbidden" });
-    }
-    const name = sanitizeName(req.query.name);
-    if (!name) return res.status(400).json({ ok: false, error: "name_required" });
-    const p = path.join(STORAGE_DIR, name);
-    if (!(await fileExists(p))) return res.status(404).json({ ok: false, error: "not_found" });
-    await fsp.unlink(p);
+    const name = safeBase(req.query.name || "");
+    if (!name) return res.status(400).json({ ok: false, error: "missing_name" });
+    await fs.unlink(filePath(name));
     res.json({ ok: true, deleted: name });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// ====== DEBUG: inspeccionar CSV (protegido) ======
-app.get("/api/debug/csv", async (req, res) => {
+// depurar lectura de CSV
+app.get("/api/debug/csv", requireAdmin, async (req, res) => {
   try {
-    if (ADMIN_TOKEN && req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return res.status(403).json({ ok: false, error: "forbidden" });
-    }
-    const name = sanitizeName(req.query.name);
-    if (!name) return res.status(400).json({ ok: false, error: "name query required" });
-    const p = path.join(STORAGE_DIR, name);
-    if (!(await fileExists(p))) return res.status(404).json({ ok: false, error: "not_found" });
-
-    const raw = await fsp.readFile(p, "utf8");
-    const { headers, rows, delim } = parseCsvSimple(raw);
+    const name = safeBase(req.query.name || "decimo.csv");
+    const { headers, rows, delimiter, count } = await loadCSV(name);
     res.json({
       ok: true,
-      delimiter: delim,
+      delimiter,
       columns: headers,
-      sample: rows.slice(0, 5),
-      count: rows.length
+      count,
+      sample: rows.slice(0, 5)
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// ====== /api/answer ======
-// ---- /api/answer ----
-// Responde tanto TXT ("explica ... según evaluacion.txt")
-// como CSV ("promedio de AUTOESTIMA por PARALELO según decimo.csv")
+// ---------------------------------------------
+// /api/answer – intenciones básicas:
+// 1) "promedio de AUTOESTIMA por PARALELO"
+// 2) "muestra N filas de decimo.csv (...)" (opcional)
+// 3) leer un TXT si se menciona (evaluacion.txt / emocionales.txt / ubicacion.txt)
+// ---------------------------------------------
 app.get("/api/answer", async (req, res) => {
+  const q = String(req.query.q || "").trim();
   try {
-    const q = String(req.query.q || "").trim();
+    // 1) Promedio AUTOESTIMA por PARALELO
+    if (/promedio.*autoestima.*paralelo/i.test(q)) {
+      const name = "decimo.csv";
+      const { headers, rows } = await loadCSV(name);
 
-    // --- Caso CSV: "promedio de X por Y según archivo.csv"
-    const rxCsv = /promedio\s+de\s+(.+?)\s+por\s+(.+?)\s+seg[uú]n\s+(.+?\.csv)/i;
-    const mmCsv = q.match(rxCsv);
-    if (mmCsv) {
-      const colValor = mmCsv[1].trim();
-      const colGrupo = mmCsv[2].trim();
-      const fileCsv  = mmCsv[3].trim();
-
-      // lee CSV (autodetecta ; o ,)
-      const { columns, rows, delimiter } = await readCsvLight(fileCsv);
-
-      if (!rows.length) {
+      const hPar = headers.find(h => h.toUpperCase().includes("PARALELO"));
+      const hAut = headers.find(h => h.toUpperCase().includes("AUTOESTIMA"));
+      if (!hPar || !hAut) {
         return res.json({
           ok: true,
-          general: `No se encontraron filas en ${fileCsv}.`,
-          lists: [],
-          tables: []
+          general: "No se encontraron las columnas requeridas (PARALELO, AUTOESTIMA).",
+          lists: [], tables: []
         });
       }
 
-      // intenta localizar columnas ignorando mayúsculas/minúsculas y espacios
-      const norm = s => String(s).trim().toUpperCase();
-      const colValorReal = columns.find(c => norm(c) === norm(colValor)) || colValor;
-      const colGrupoReal = columns.find(c => norm(c) === norm(colGrupo)) || colGrupo;
+      const agg = new Map(); // paralelo -> {sum,count}
+      for (const r of rows) {
+        const par = String(r[hPar] ?? "").trim();
+        const val = toNumber(r[hAut]);
+        if (!Number.isFinite(val)) continue;
+        const a = agg.get(par) || { sum: 0, count: 0 };
+        a.sum += val; a.count += 1;
+        agg.set(par, a);
+      }
 
-      const outRows = promedioPorGrupo(rows, colValorReal, colGrupoReal);
-
-      if (!outRows.length) {
+      if (agg.size === 0) {
         return res.json({
           ok: true,
-          general: `No se encontraron valores numéricos para calcular el promedio de '${colValorReal}' por '${colGrupoReal}' en ${fileCsv}.`,
-          lists: [],
-          tables: []
+          general: "No se encontraron valores numéricos para calcular el promedio con las columnas detectadas.",
+          lists: [], tables: []
         });
       }
+
+      const rowsOut = [...agg.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([par, x]) => [par, Number((x.sum / x.count).toFixed(1))]);
 
       return res.json({
         ok: true,
-        general: `Promedio de ${colValorReal} por ${colGrupoReal} usando '${fileCsv}' (delimitador '${delimiter}').`,
+        general: "Promedio de AUTOESTIMA por PARALELO calculado a partir de decimo.csv.",
         lists: [],
         tables: [{
-          title: `Promedio de ${colValorReal} por ${colGrupoReal}`,
-          columns: [colGrupoReal, `Promedio ${colValorReal}`],
-          rows: outRows
+          title: "Promedio por paralelo",
+          columns: ["PARALELO", "AUTOESTIMA_PROMEDIO"],
+          rows: rowsOut
         }]
       });
     }
 
-    // --- Caso TXT: "explica ... según archivo.txt"
-    const rxTxt = /(explica|resumen|resume|defin[eí]ne)\b.*seg[uú]n\s+(.+?\.txt)/i;
-    const mmTxt = q.match(rxTxt);
-    if (mmTxt) {
-      const fileTxt = mmTxt[2].trim();
-      const full    = path.join(STORAGE_DIR, fileTxt);
-      const text    = await fs.readFile(full, "utf8");
-
-      // mini "resumen": primeras 6 líneas no vacías
-      const lines = text.replace(/\r\n/g,"\n").split("\n").map(s=>s.trim()).filter(Boolean);
-      const pick  = lines.slice(0, 6);
-
+    // 2) Muestra N filas
+    const mSample = q.match(/muestra\s+(\d+)\s+filas/i);
+    if (mSample) {
+      const n = Math.max(1, Math.min(20, Number(mSample[1])));
+      const { headers, rows } = await loadCSV("decimo.csv");
+      const sample = rows.slice(0, n).map(r => headers.map(h => r[h]));
       return res.json({
         ok: true,
-        general: pick.join(" "),
-        lists: pick.length ? [{
-          title: `Puntos clave según ${fileTxt}`,
-          items: pick
-        }] : [],
-        tables: []
+        general: `Primeras ${n} filas de decimo.csv`,
+        tables: [{ title: "Muestra", columns: headers, rows: sample }],
+        lists: []
       });
     }
 
-    // fallback si la pregunta no encaja con patrones conocidos
+    // 3) TXT simple
+    const mTxt = q.match(/\b(evaluacion|emocionales|ubicacion)\.txt\b/i);
+    if (mTxt) {
+      const name = mTxt[0].toLowerCase();
+      try {
+        const txt = await fs.readFile(filePath(name), "utf8");
+        const snippet = txt.trim().split(/\n+/).slice(0, 3).join(" ");
+        return res.json({ ok: true, general: snippet || `Leído ${name}.`, lists: [], tables: [] });
+      } catch {
+        return res.json({ ok: true, general: `No encontré ${name} en el servidor.`, lists: [], tables: [] });
+      }
+    }
+
+    // fallback
     return res.json({
       ok: true,
-      general: "Pregunta recibida, pero no identifiqué un patrón soportado. Intenta por ejemplo:\n- promedio de AUTOESTIMA por PARALELO según decimo.csv\n- explica la asertividad según evaluacion.txt",
-      lists: [],
-      tables: []
+      general: "Pregunta recibida. Puedes pedir: “promedio de AUTOESTIMA por PARALELO según decimo.csv”, “muestra 3 filas de decimo.csv”, o referirte a evaluacion.txt/emocionales.txt/ubicacion.txt.",
+      lists: [], tables: []
     });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok:false, error: String(err?.message || err) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// ====== Lógica: CSV ======
-async function answerCsv(q) {
-  // extrae nombre del csv (…según X.csv / segun X.csv)
-  const m = q.match(/seg[uú]n\s+([A-Za-z0-9_.-]+\.csv)/i) || q.match(/([A-Za-z0-9_.-]+\.csv)/i);
-  if (!m) return { ok: false, error: "no_csv_name_in_query" };
-
-  const csvName = sanitizeName(m[1]);
-  const csvPath = path.join(STORAGE_DIR, csvName);
-  if (!(await fileExists(csvPath))) {
-    return { ok: false, error: `csv_not_found: ${csvName}` };
-  }
-
-  const raw = await fsp.readFile(csvPath, "utf8");
-  const { headers, rows } = parseCsvSimple(raw);
-  if (!rows.length) {
-    return { ok: true, general: "No se encontraron filas en el CSV.", tables: [], lists: [] };
-  }
-
-  // identifica columnas
-  const H = headers;
-  const Hn = H.map(norm);
-
-  // heurísticas a partir del texto de la pregunta
-  const nq = norm(q);
-
-  // métrica: intenta detectar una palabra que coincida con un encabezado
-  let metricHeader = null;
-  for (const h of H) {
-    if (nq.includes(norm(h))) {
-      metricHeader = h;
-      break;
-    }
-  }
-  // fallback comunes: AUTOESTIMA, ASERTIVIDAD, PROMEDIO...
-  if (!metricHeader) {
-    const prefs = ["AUTOESTIMA", "ASERTIVIDAD", "PROMEDIO"];
-    for (const pref of prefs) {
-      const idx = Hn.indexOf(pref);
-      if (idx >= 0) { metricHeader = H[idx]; break; }
-    }
-  }
-
-  // dimensión / agrupación
-  let groupHeader = null;
-  const groupPrefs = [
-    { key: "PARALELO", aliases: ["PARALELO"] },
-    { key: "CURSO", aliases: ["CURSO"] },
-    { key: "SECCION", aliases: ["SECCION", "SECCIÓN"] },
-  ];
-
-  for (const gp of groupPrefs) {
-    if (nq.includes(gp.key) || gp.aliases.some(a => nq.includes(norm(a)))) {
-      const idx = Hn.indexOf(gp.key);
-      if (idx >= 0) { groupHeader = H[idx]; break; }
-    }
-  }
-  // fallback si no especifica: intenta PARALLELO si existe
-  if (!groupHeader) {
-    const idx = Hn.indexOf("PARALELO");
-    if (idx >= 0) groupHeader = H[idx];
-  }
-
-  if (!metricHeader || !groupHeader) {
-    return {
-      ok: true,
-      general:
-        "No se puede proporcionar información porque no se detectaron las columnas necesarias (métrica y/o agrupación). " +
-        "Verifica que en el CSV existan, por ejemplo, 'AUTOESTIMA' y 'PARALELO'.",
-      tables: [],
-      lists: []
-    };
-  }
-
-  // agrupa y calcula promedio
-  const groups = new Map(); // group -> { sum, count }
-  for (const r of rows) {
-    const g = (r[groupHeader] ?? "").trim();
-    const v = numeric(r[metricHeader]);
-    if (!g || v == null) continue;
-    const acc = groups.get(g) || { sum: 0, count: 0 };
-    acc.sum += v;
-    acc.count += 1;
-    groups.set(g, acc);
-  }
-
-  const result = Array.from(groups.entries())
-    .map(([g, { sum, count }]) => [g, +(sum / count).toFixed(1)])
-    .sort((a, b) => (a[0] > b[0] ? 1 : -1));
-
-  if (!result.length) {
-    return {
-      ok: true,
-      general: "No se encontraron valores numéricos para calcular el promedio con las columnas detectadas.",
-      tables: [],
-      lists: []
-    };
-  }
-
-  return {
-    ok: true,
-    general: `Promedio de ${metricHeader} por ${groupHeader} según ${csvName}.`,
-    tables: [
-      {
-        title: `Promedio de ${metricHeader} por ${groupHeader}`,
-        columns: [groupHeader, `Promedio ${metricHeader}`],
-        rows: result.map(([g, avg]) => [g, avg])
-      }
-    ],
-    lists: []
-  };
-}
-
-// ====== Lógica: TXT (resumen simple local) ======
-async function answerTxt(q) {
-  // extrae nombre del txt
-  const m = q.match(/([A-Za-z0-9_.-]+\.txt)/i);
-  if (!m) return { ok: false, error: "no_txt_name_in_query" };
-  const txtName = sanitizeName(m[1]);
-  const txtPath = path.join(STORAGE_DIR, txtName);
-  if (!(await fileExists(txtPath))) return { ok: false, error: `txt_not_found: ${txtName}` };
-
-  const content = await fsp.readFile(txtPath, "utf8");
-  // resumen local muy simple (las primeras frases/párrafos)
-  const snippet = content
-    .replace(/\r/g, "")
-    .split(/\n+/)
-    .map(s => s.trim())
-    .filter(Boolean)
-    .slice(0, 5)
-    .join(" ");
-
-  const general =
-    snippet.length > 0
-      ? `Resumen de ${txtName}: ${snippet.slice(0, 900)}${snippet.length > 900 ? "…" : ""}`
-      : `No se pudo extraer contenido de ${txtName}.`;
-
-  return { ok: true, general, lists: [], tables: [] };
-}
-
-// ====== Start ======
+// ---------- Start ----------
 app.listen(PORT, () => {
-  console.log(`Lexium API listening on http://0.0.0.0:${PORT}`);
+  console.log(`API ready on :${PORT}`);
 });
