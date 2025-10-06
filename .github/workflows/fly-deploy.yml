@@ -13,19 +13,28 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Deploy to Fly (explicit config & dockerfile)
+      - name: Deploy to Fly (force fast builder)
         run: |
           flyctl deploy \
             -a lexium-api-marcelo-20251003x \
+            --remote-only \
+            --build-only \
+            --vm-size shared-cpu-1x \
+            --ha=false \
             --config fly.toml \
-            --dockerfile Dockerfile \
-            --remote-only
+            --dockerfile Dockerfile
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Show status & last logs
+      - name: Launch final instance
         run: |
-          flyctl status -a lexium-api-marcelo-20251003x || true
-          flyctl logs   -a lexium-api-marcelo-20251003x --since 5m || true
+          flyctl deploy -a lexium-api-marcelo-20251003x --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Check status
+        run: |
+          flyctl status -a lexium-api-marcelo-20251003x
+          flyctl logs -a lexium-api-marcelo-20251003x --since 5m
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
