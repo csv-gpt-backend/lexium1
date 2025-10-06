@@ -1,0 +1,68 @@
+name: Fly - Clean Volumes (orphaned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (solo listar, no borrar)"
+        required: true
+        default: "true"
+
+jobs:
+  clean-orphan-volumes:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }} # debe ser 'lexium-api-marcelo-20251003x'
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+    steps:
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Show target app
+        run: |
+          echo "App: $FLY_APP_NAME"
+          flyctl status -a "$FLY_APP_NAME" || true
+
+      - name: List all volumes (JSON)
+        id: list
+        run: |
+          echo "== Volúmenes existentes =="
+          flyctl volumes list -a "$FLY_APP_NAME"
+          echo "== JSON =="
+          flyctl volumes list -a "$FLY_APP_NAME" --json > vols.json
+          cat vols.json
+
+      - name: Compute orphaned volume IDs
+        id: compute
+        run: |
+          node -e "
+            const fs=require('fs');
+            const vols=JSON.parse(fs.readFileSync('vols.json','utf8'));
+            const orphans=(vols||[]).filter(v=>!v.AttachedTo || v.AttachedTo==='-' || v.attached_to==null || v.attached_to==='');
+            console.log('ORPHANS:', orphans.map(v=>v.ID||v.Id||v.id).join(' '));
+          " | tee orphans.txt
+
+      - name: Delete orphaned volumes (respect dry-run)
+        run: |
+          IDS=$(sed -n 's/^ORPHANS: //p' orphans.txt)
+          if [ -z "$IDS" ]; then
+            echo "No hay volúmenes huérfanos para borrar. ✅"
+            exit 0
+          fi
+
+          echo "IDs huérfanos: $IDS"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN activo: no se borrará nada. ✅"
+            exit 0
+          fi
+
+          for ID in $IDS; do
+            echo "Borrando volumen $ID ..."
+            flyctl volumes destroy "$ID" -a "$FLY_APP_NAME" --yes || true
+          done
+
+      - name: List volumes after cleanup
+        run: |
+          echo "== Volúmenes después de limpiar =="
+          flyctl volumes list -a "$FLY_APP_NAME" || true
