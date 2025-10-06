@@ -1,4 +1,4 @@
-// ====== Lexium API MIN (Fly.io) — GPT-5 Responses, 2 rutas ======
+// ===== Lexium API MIN — GPT-5 Responses (JSON forzado) =====
 import express from "express";
 import cors from "cors";
 import compression from "compression";
@@ -8,26 +8,27 @@ import http from "http";
 import { Agent } from "undici";
 import { fileURLToPath } from "url";
 
-// ---- Config
+/* ---------- Config ---------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const PORT           = process.env.PORT || 8080;
-const STORAGE_DIR    = process.env.STORAGE_DIR || "/app/storage";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-5";
+const PORT            = process.env.PORT || 8080;
+const STORAGE_DIR     = process.env.STORAGE_DIR || "/app/storage"; // decimo.csv + 3 txt
+const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL    = process.env.OPENAI_MODEL || "gpt-5";
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses";
 
-// ---- App base
+/* ---------- App ---------- */
 const app = express();
 app.use(express.json({ limit: "3mb" }));
 app.use(cors({ origin: "*" }));
 app.use(compression());
 
-// ---- Utils
+/* ---------- Utilidad ---------- */
 function norm(s=""){ return String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim(); }
 function toNum(x){ const n = Number(String(x).replace(",", ".")); return Number.isFinite(n)?n:NaN; }
 
+/* ---------- Datos (preload en memoria) ---------- */
 async function loadCSV(name){
   const full = path.join(STORAGE_DIR, name);
   const raw = await fs.readFile(full, "utf8");
@@ -37,52 +38,53 @@ async function loadCSV(name){
   const columns = lines[0].split(delim).map(h => h.trim());
   const rows = lines.slice(1).map(l => {
     const vals = l.split(delim).map(v => v.replace(/^"(.*)"$/, "$1").trim());
-    const o = {}; columns.forEach((h,i)=>o[h]=vals[i]??""); return o;
+    const o={}; columns.forEach((h,i)=>o[h]=vals[i]??""); return o;
   });
   return { columns, rows };
 }
 async function readText(name){ try{ return await fs.readFile(path.join(STORAGE_DIR,name),"utf8"); }catch{ return ""; } }
 
-// ---- Preload en memoria (sin /api/reload para simplificar)
 let DATA = { columns: [], rows: [] };
 let TXT  = { emocionales:"", evaluacion:"", ubicacion:"" };
+
 await fs.mkdir(STORAGE_DIR, { recursive: true });
-try {
+try{
   const { columns, rows } = await loadCSV("decimo.csv");
   DATA = { columns, rows };
   TXT.emocionales = await readText("emocionales.txt");
   TXT.evaluacion  = await readText("evaluacion.txt");
   TXT.ubicacion   = await readText("ubicacion.txt");
   console.log(`📦 Preload OK: filas=${rows.length}, cols=${columns.length}`);
-} catch(e){
-  console.log("⚠️ Preload falló:", String(e));
-}
+}catch(e){ console.log("⚠️ Preload falló:", String(e)); }
 
-// ---- Keep-Alive a OpenAI
-const keepAliveAgent = new Agent({ keepAliveTimeout: 10_000, keepAliveMaxTimeout: 10_000 });
+/* ---------- OpenAI (Responses API con JSON forzado) ---------- */
+const keepAlive = new Agent({ keepAliveTimeout: 10_000, keepAliveMaxTimeout: 10_000 });
 
-// ---- OpenAI call (Responses API)
-async function askGPT(systemPrompt, userPrompt, maxOut=600){
+async function askGPT(systemPrompt, userPrompt, maxOut=650){
   const r = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type":"application/json" },
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({
-      model: OPENAI_MODEL,                 // gpt-5
+      model: OPENAI_MODEL,                // gpt-5
       reasoning: { effort: "low" },
+      response_format: { type: "json_object" }, // 👈 salida JSON SIEMPRE
       max_output_tokens: maxOut,
       input: [
         { role: "system", content: systemPrompt },
         { role: "user",   content: userPrompt }
       ]
     }),
-    dispatcher: keepAliveAgent
+    dispatcher: keepAlive
   });
   const data = await r.json();
   if (!r.ok) throw new Error(data?.error?.message || r.statusText);
-  return data.output_text || "";
+  return data.output_text || "{}";
 }
 
-// ---- Rutas
+/* ---------- Endpoints ---------- */
 app.get("/api/ping", (_req,res)=>{
   res.json({ ok:true, model: OPENAI_MODEL, region: process.env.FLY_REGION || "?" });
 });
@@ -100,18 +102,24 @@ app.get("/api/ask", async (req,res)=>{
     const parCol   = columns.find(c=>norm(c)==="paralelo") || "PARALELO";
     const cursoCol = columns.find(c=>norm(c)==="curso")    || "CURSO";
 
-    // Contexto básico y liviano siempre (funciona para todo)
+    // Contexto pequeño y estable (válido para todo)
     const keep = [nameCol, parCol, cursoCol, ...numericCols.slice(0,6)];
     const slim = rows.slice(0, 300).map(r => { const o={}; for (const c of keep) o[c]=r[c]; return o; });
 
     const systemPrompt = `
-Devuelve SOLO JSON exacto:
-{"ok":true,"general":"","lists":[{"title":"","items":[]}],"tables":[{"title":"","columns":[],"rows":[]}]}
-Usa CSV para cálculos (promedios, top, percentiles, filtros) y TXT para definiciones/interpretación.
-No inventes. Español claro.`;
+Devuelve SOLO un objeto JSON con esta forma:
+{
+  "ok": true,
+  "general": "texto",
+  "lists": [ { "title":"", "items": [] } ],
+  "tables": [ { "title":"", "columns": [], "rows": [] } ]
+}
+Usa CSV para cálculos (promedios, top, percentiles, filtros) y TXT para definiciones.
+No inventes. Español claro.
+`;
+
     const userPrompt = `Pregunta: ${q}
-Datos CSV (muestra):
-${JSON.stringify({ columnas: keep, filas: slim })}
+CSV (muestra): ${JSON.stringify({ columnas: keep, filas: slim })}
 TXT: ${JSON.stringify({
   emocionales: (TXT.emocionales||"").slice(0,1600),
   evaluacion:  (TXT.evaluacion ||"").slice(0,1000),
@@ -119,11 +127,7 @@ TXT: ${JSON.stringify({
 })}`;
 
     const out = await askGPT(systemPrompt, userPrompt, 700);
-
-    let parsed; try { parsed = JSON.parse(out); }
-    catch { const m = out.match(/\{[\s\S]*\}$/); parsed = m?JSON.parse(m[0]):null; }
-
-    if (!parsed) return res.json({ ok:true, general:"No pude interpretar la salida del modelo.", lists:[], tables:[] });
+    const parsed = JSON.parse(out);
 
     res.json({
       ok: parsed.ok !== false,
@@ -137,7 +141,7 @@ TXT: ${JSON.stringify({
   }
 });
 
-// ---- Start (keep-alive)
+/* ---------- Start (keep-alive) ---------- */
 const server = http.createServer(app);
 server.keepAliveTimeout = 10_000;
 server.headersTimeout   = 12_000;
