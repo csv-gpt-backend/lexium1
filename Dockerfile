@@ -1,7 +1,8 @@
-app = "lexium-api-marcelo-20251003x"
-
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_start_machines = true
-  min_machines_running = 1
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev || npm i --omit=dev
+COPY . .
+ENV NODE_ENV=production
+EXPOSE 8080
+CMD ["node", "server.js"]
