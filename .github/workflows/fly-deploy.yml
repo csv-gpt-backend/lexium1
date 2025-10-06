@@ -1,31 +1,24 @@
-name: Deploy to Fly
+name: Fly Deploy
 on:
-  push: { branches: [ "main" ] }
-  workflow_dispatch: {}
-env:
-  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-  FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
-  FLY_ORG: ${{ secrets.FLY_ORG }}
-  FLY_REGION: ${{ secrets.FLY_REGION }}
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@v1
-      - name: Ensure app
-        run: flyctl apps create "$FLY_APP_NAME" -o "$FLY_ORG" || true
-      - name: Ensure volume
-        run: flyctl volumes create data_vol --region "$FLY_REGION" --size 1 -a "$FLY_APP_NAME" --yes || true
-      - name: Deploy
-        run: flyctl deploy -a "$FLY_APP_NAME" --remote-only
-      - name: Status / machines / checks
-        run: |
-          flyctl status -a "$FLY_APP_NAME" || true
-          flyctl machines list -a "$FLY_APP_NAME" || true
-          flyctl checks list -a "$FLY_APP_NAME" || true
-      - name: Print URLs
-        run: |
-          echo "URL:    https://${FLY_APP_NAME}.fly.dev"
-          echo "Health: https://${FLY_APP_NAME}.fly.dev/api/ping"
-          echo "Files:  https://${FLY_APP_NAME}.fly.dev/api/files"
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly
+        run: flyctl deploy -a lexium-api-marcelo-20251003x --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Check app status
+        run: flyctl status -a lexium-api-marcelo-20251003x
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
