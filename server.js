@@ -16,8 +16,9 @@ const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || "lexium123";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "*")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-// Modelo por defecto: ¡NO cambiamos a “5.1”! (puedes fijarlo por SECRET OPENAI_MODEL)
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+// ⚠️ Modelo por defecto ahora es GPT-5 “full” (no mini). Puedes override por secret OPENAI_MODEL.
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5";
+// Usamos Chat Completions sin temperature (GPT-5 lo rechaza si se manda)
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
 await fs.mkdir(STORAGE_DIR, { recursive: true });
@@ -567,7 +568,7 @@ async function callOpenAIJSON(systemPrompt, userPrompt, maxTokens = 1200){
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: OPENAI_MODEL,     // p.ej. gpt-5-mini; sin temperature (usa default=1)
+      model: OPENAI_MODEL,     // gpt-5; sin temperature (usa default del modelo)
       max_tokens: maxTokens,
       messages: [
         { role: "system", content: systemPrompt },
