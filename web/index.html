@@ -1,9 +1,10 @@
+--- index.html ---
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Asistente Lexium</title>
+<title>DDDAsistente Lexium</title>
 <style>
   :root{ --bg:#fff; --fg:#111; --muted:#6b7280; --pri:#0d6efd; --bd:#e5e7eb; }
   html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;}
@@ -17,6 +18,7 @@
   .toolbar button, .toolbar select{
     padding:9px 14px;border:1px solid var(--bd);border-radius:10px;background:#fff;cursor:pointer;
   }
+  .toolbar button[disabled]{opacity:.6;cursor:not-allowed}
   .toolbar button:hover{background:#f5f7fb}
   .hist{position:fixed;right:14px;top:10px;z-index:9}
   .hist button{padding:8px 12px;border:1px solid var(--bd);border-radius:10px;background:#fff}
@@ -34,12 +36,10 @@
 <body>
 <div class="wrap">
 
-  <!-- botón Historial (arriba derecha) -->
   <div class="hist">
     <button id="btnHist" title="Ver sesiones guardadas">Historial</button>
   </div>
 
-  <!-- Bloque superior fijo -->
   <div class="hero" aria-label="cabecera">
     <div class="heroGrid">
       <div class="sideImg">
@@ -53,14 +53,13 @@
       </div>
     </div>
 
-    <!-- Caja de texto + barra de acciones -->
     <div style="margin:8px 0">
       <textarea id="q" class="query" rows="2" placeholder="Escribe tu pregunta (ej: reporte completo de Castillo D Julia; promedio de ASERTIVIDAD por paralelo; top 5 en IE global; percentil de Patiño G Olivia en COMPROMISO)"></textarea>
       <div id="status" class="status muted">Comprobando backend…</div>
     </div>
 
     <div class="toolbar">
-      <button id="btnSend" title="Enviar consulta al backend">Enviar</button>
+      <button id="btnSend" title="Enviar consulta al backend">Enviar (Ctrl/⌘+Enter)</button>
       <button id="btnDict" title="Dictar por voz (empieza / detiene)">🎤 Dictar</button>
       <button id="btnToggleAV" title="Parar/Activar voz y video">⏯ Parar/Activar voz y video</button>
       <button id="btnReplay" title="Reproducir nuevamente la voz desde el principio">⟳ Reproducir nuevamente</button>
@@ -75,7 +74,6 @@
     </div>
   </div>
 
-  <!-- Resultado -->
   <div id="out" class="out" aria-live="polite"></div>
   <div class="muted">La respuesta se genera estrictamente usando el CSV y los TXT cargados en tu backend.</div>
 
@@ -83,9 +81,9 @@
 
 <script>
 /* ====== CONFIG ====== */
-const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev"; // ← tu API en Fly
-const ANSWER_PATH = "/api/answer";
-const REPORT_PATH = "/api/report";
+const API_BASE = "https://lexium-api-marcelo-20251003x.fly.dev"; // tu API en Fly
+const PATH_ASK    = "/api/ask";
+const PATH_ANSWER = "/api/answer"; // fallback si /api/ask falla
 
 /* ====== UI refs ====== */
 const q = document.getElementById("q");
@@ -107,10 +105,9 @@ let currentVoice = null;
 let speaking = false;
 let paused = false;
 let lastSpokenText = "";
-let resumeIndex = 0;
 let recognizer = null;
 
-/* ====== Voz: elegir femenina español ====== */
+/* ====== Voz ====== */
 function pickSpanishFemale(){
   voices = window.speechSynthesis.getVoices();
   const es = voices.filter(v=>/^es(-|_)/i.test(v.lang));
@@ -121,14 +118,11 @@ if (typeof speechSynthesis !== "undefined") {
   pickSpanishFemale();
   window.speechSynthesis.onvoiceschanged = pickSpanishFemale;
 }
-
-/* ====== Hablar con reanudación ====== */
-function speak(text, fromIndex=0){
+function speak(text){
   if (!text) return;
   lastSpokenText = text;
-  resumeIndex = fromIndex;
-  const chunk = text.slice(fromIndex);
-  const u = new SpeechSynthesisUtterance(chunk);
+  if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
   if (currentVoice) u.voice = currentVoice;
   u.lang = (currentVoice && currentVoice.lang) || "es-ES";
   u.rate = 1; u.pitch = 1; u.volume = 1;
@@ -138,95 +132,35 @@ function speak(text, fromIndex=0){
   window.speechSynthesis.speak(u);
 }
 function toggleAV(){
-  if (speaking && !paused){
-    window.speechSynthesis.pause();
-    paused = true;
-    vid.pause();
-  } else if (speaking && paused){
-    window.speechSynthesis.resume();
-    paused = false;
-    vid.play().catch(()=>{});
-  } else {
-    speak(lastSpokenText, resumeIndex);
-  }
+  if (speaking && !paused){ window.speechSynthesis.pause(); paused = true; vid.pause(); }
+  else if (speaking && paused){ window.speechSynthesis.resume(); paused = false; vid.play().catch(()=>{}); }
+  else { speak(lastSpokenText); }
 }
-function replay(){
-  if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-  speak(lastSpokenText, 0);
-}
+function replay(){ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); speak(lastSpokenText); }
 
 /* ====== Render ====== */
+function escapeHtml(x){return String(x).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
 function renderAnswer(data){
   let html = "";
-  if (data.general) {
-    html += `<p>${escapeHtml(data.general).replace(/\n/g,"<br>")}</p>`;
-  }
+  if (data.general) html += `<p>${escapeHtml(data.general).replace(/\n/g,"<br>")}</p>`;
   (data.lists||[]).forEach(l=>{
     html += `<h3>${escapeHtml(l.title||"Lista")}</h3><ol>`;
     (l.items||[]).forEach(it=> html += `<li>${escapeHtml(it)}</li>`);
     html += `</ol>`;
   });
   (data.tables||[]).forEach(t=>{
-    const cols = t.columns||[];
-    const rows = t.rows||[];
+    const cols = t.columns||[], rows = t.rows||[];
     html += `<h3>${escapeHtml(t.title||"Tabla")}</h3><table><thead><tr>`;
     cols.forEach(c=> html+=`<th>${escapeHtml(String(c))}</th>`);
     html += `</tr></thead><tbody>`;
-    rows.forEach(r=>{
-      html += `<tr>${r.map(x=>`<td>${escapeHtml(String(x))}</td>`).join("")}</tr>`;
-    });
+    rows.forEach(r=>{ html += `<tr>${(r||[]).map(x=>`<td>${escapeHtml(String(x))}</td>`).join("")}</tr>`; });
     html += `</tbody></table>`;
   });
   out.innerHTML = html || "<em>Sin contenido.</em>";
-
-  if (data.general) {
-    if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
-    speak(data.general, 0);
-  }
-}
-function escapeHtml(x){return String(x).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
-
-/* ====== Enviar a backend ====== */
-async function ask(){
-  const text = q.value.trim();
-  if (!text) return;
-  try{
-    const isReport = /reporte\s+completo\s+de\s+/i.test(text);
-    const path = isReport ? REPORT_PATH : ANSWER_PATH;
-    const url = `${API_BASE}${path}?q=${encodeURIComponent(text)}`;
-    const r = await fetch(url, { headers:{Accept:"application/json"} });
-    let data;
-    try { data = await r.json(); } catch(e){ throw new Error(`Respuesta no JSON (${r.status})`); }
-    if (!r.ok || !data.ok) {
-      out.innerHTML = `<pre style="color:#b91c1c">${escapeHtml((data && (data.error||data.general)) || r.statusText || "Error")}</pre>`;
-      return;
-    }
-    saveSession(text, data);
-    renderAnswer(data);
-  }catch(e){
-    out.innerHTML = `<pre style="color:#b91c1c">${escapeHtml(String(e))}</pre>`;
-  }
+  if (data.general) speak(data.general);
 }
 
-/* ====== Dictado ====== */
-function toggleDict(){
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { alert("Dictado no soportado en este navegador."); return; }
-  if (!recognizer){
-    recognizer = new SR();
-    recognizer.lang = "es-ES";
-    recognizer.continuous = false;
-    recognizer.interimResults = false;
-    recognizer.onresult = e=>{
-      const t = Array.from(e.results).map(r=>r[0].transcript).join(" ");
-      q.value = (q.value ? q.value+" " : "") + t;
-    };
-  }
-  if (recognizer.listening){ recognizer.stop(); recognizer.listening=false; btnDict.textContent="🎤 Dictar"; }
-  else { recognizer.start(); recognizer.listening=true; btnDict.textContent="⏹ Detener dictado"; }
-}
-
-/* ====== Sesiones (historial localStorage) ====== */
+/* ====== Historial ====== */
 function saveSession(question, data){
   const key = "lexium_sessions";
   const all = JSON.parse(localStorage.getItem(key) || "[]");
@@ -240,36 +174,87 @@ function openHistory(){
   if (!all.length) { alert("Sin historial."); return; }
   const w = window.open("", "_blank");
   const html = `
-  <html><head><title>Historial</title>
-  <style>body{font:14px system-ui} pre{white-space:pre-wrap}</style></head><body>
+  <html><head><title>Historial</title><style>body{font:14px system-ui} pre{white-space:pre-wrap}</style></head><body>
   <h2>Sesiones</h2>
   ${all.map(s=>`
     <details>
       <summary><b>${s.id}</b> — ${escapeHtml(s.question)}</summary>
       <pre>${escapeHtml(JSON.stringify(s.data, null, 2))}</pre>
-    </details>
-  `).join("")}
+    </details>`).join("")}
   </body></html>`;
   w.document.write(html); w.document.close();
 }
 
-/* ====== Exportar ====== */
+/* ====== Dictado ====== */
+function toggleDict(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { statusEl.textContent = "Dictado no soportado en este navegador."; return; }
+  if (!recognizer){
+    recognizer = new SR(); recognizer.lang = "es-ES"; recognizer.continuous = false; recognizer.interimResults = false;
+    recognizer.onresult = e=>{ const t = Array.from(e.results).map(r=>r[0].transcript).join(" "); q.value = (q.value ? q.value+" " : "") + t; };
+    recognizer.onerror = ()=>{ statusEl.textContent = "Error en dictado."; btnDict.textContent="🎤 Dictar"; recognizer.listening=false; };
+    recognizer.onend = ()=>{ btnDict.textContent="🎤 Dictar"; recognizer.listening=false; };
+  }
+  if (recognizer.listening){ recognizer.stop(); }
+  else { recognizer.start(); recognizer.listening=true; btnDict.textContent="⏹ Detener dictado"; }
+}
+
+/* ====== Enviar a backend (GPT-5 first) ====== */
+let inflight = null;
+async function ask(){
+  const text = q.value.trim();
+  if (!text) return;
+  // bloquear UI
+  btnSend.disabled = true; statusEl.innerHTML = `Consultando <b>GPT-5</b>…`; statusEl.classList.remove("ok","bad");
+  const ctrl = new AbortController(); inflight = ctrl;
+  const urlAsk = `${API_BASE}${PATH_ASK}?q=${encodeURIComponent(text)}`;
+  try{
+    const data = await fetchJSON(urlAsk, ctrl.signal, 30000); // 30s timeout
+    if (!data || data.ok === false) throw new Error((data && (data.error||data.general)) || "Error en /api/ask");
+    saveSession(text, data);
+    renderAnswer(data);
+    statusEl.innerHTML = `Fuente: <span class="ok">GPT-5</span>`;
+    statusEl.classList.add("ok"); statusEl.classList.remove("bad");
+  }catch(e){
+    // fallback determinista
+    try{
+      statusEl.innerHTML = `GPT-5 falló (${escapeHtml(String(e.message||e))}). Probando modo reglas…`;
+      const urlAns = `${API_BASE}${PATH_ANSWER}?q=${encodeURIComponent(text)}`;
+      const data2 = await fetchJSON(urlAns, undefined, 15000);
+      if (!data2 || data2.ok === false) throw new Error((data2 && (data2.error||data2.general)) || "Error en /api/answer");
+      saveSession(text, data2);
+      renderAnswer(data2);
+      statusEl.innerHTML = `Fuente: <span class="bad">Reglas (fallback)</span>`;
+      statusEl.classList.add("bad"); statusEl.classList.remove("ok");
+    }catch(e2){
+      out.innerHTML = `<pre style="color:#b91c1c">${escapeHtml(String(e2.message||e2))}</pre>`;
+      statusEl.textContent = "Sin respuesta.";
+      statusEl.classList.add("bad"); statusEl.classList.remove("ok");
+    }
+  }finally{
+    btnSend.disabled = false; inflight = null;
+  }
+}
+function fetchJSON(url, signal, timeoutMs=25000){
+  const ctrl = signal ? {signal} : new AbortController();
+  const sig  = signal || ctrl.signal;
+  const t = setTimeout(()=>{ try{ ctrl.abort?.(); }catch{} }, timeoutMs);
+  return fetch(url, { headers:{Accept:"application/json"}, signal: sig })
+    .then(async r => { clearTimeout(t); let d; try{ d = await r.json(); }catch{ throw new Error(`Respuesta no JSON (${r.status})`); } return d; });
+}
+
+/* ====== Export ====== */
 selExport.addEventListener("change", ()=>{
   const v = selExport.value; selExport.value="";
   if (!out.innerHTML.trim()){ alert("No hay contenido que exportar."); return; }
-  if (v==="pdf"){ // vista previa
+  if (v==="pdf"){
     const w = window.open("","_blank");
     w.document.write(`<html><head><title>Export PDF</title></head><body>${out.innerHTML}</body></html>`);
-    w.document.close();
-    w.focus(); w.print();
+    w.document.close(); w.focus(); w.print();
   } else if (v==="xls" || v==="doc"){
     const mime = v==="xls" ? "application/vnd.ms-excel" : "application/msword";
     const blob = new Blob([`<html><body>${out.innerHTML}</body></html>`], {type:mime});
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `export.${v}`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `export.${v}`; a.click(); URL.revokeObjectURL(a.href);
   }
 });
 
@@ -299,7 +284,6 @@ btnReplay.addEventListener("click", replay);
 btnHist.addEventListener("click", openHistory);
 btnClear.addEventListener("click", ()=>{ q.value=""; out.innerHTML=""; if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); });
 btnNew.addEventListener("click", ()=>{ if (window.speechSynthesis.speaking) window.speechSynthesis.cancel(); q.value=""; out.innerHTML=""; });
-
 q.addEventListener("keydown", e=>{ if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) ask(); });
 
 /* start */
