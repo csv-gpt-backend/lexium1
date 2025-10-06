@@ -1,4 +1,4 @@
-// ======================= Lexium API GPT-5 =======================
+// server.js — Lexium API FINAL (GPT-5, CSV + 3 TXT)
 import express from "express";
 import cors from "cors";
 import fs from "fs/promises";
@@ -7,143 +7,158 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PORT = process.env.PORT || 8080;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5";
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "lexium123";
-const CORS_ORIGINS = (process.env.CORS_ORIGINS || "*").split(",").map(s => s.trim());
+const PORT = process.env.PORT || 8080;
 const STORAGE_DIR = process.env.STORAGE_DIR || "/app/storage";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL = "gpt-5";
+
+await fs.mkdir(STORAGE_DIR, { recursive: true });
 
 const app = express();
-app.use(express.json({ limit: "3mb" }));
-app.use(cors());
+app.use(express.json({ limit: "5mb" }));
+app.use(cors({ origin: "*" }));
 
-// ======================= Helpers =======================
-function norm(s = "") {
-  return String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-}
 function toNum(x) {
-  const n = Number(String(x).replace(",", "."));
+  const n = Number(String(x).replace(",", ".").replace(/[^\d\.\-]/g, ""));
   return Number.isFinite(n) ? n : NaN;
 }
-async function readText(name) {
-  const p = path.join(STORAGE_DIR, name);
-  try { return await fs.readFile(p, "utf8"); } catch { return ""; }
-}
-async function loadCSV(name) {
-  const full = path.join(STORAGE_DIR, name);
+
+// ===== CSV / TXT =====
+async function loadCSV(filename) {
+  const full = path.join(STORAGE_DIR, filename);
   const raw = await fs.readFile(full, "utf8");
   const lines = raw.split(/\r?\n/).filter(l => l.trim());
   if (!lines.length) return { columns: [], rows: [] };
-  const delimiter = lines[0].includes(";") ? ";" : ",";
-  const headers = lines[0].split(delimiter).map(h => h.trim());
+
+  const first = lines[0];
+  const delim = first.includes(";") ? ";" : ",";
+  const columns = first.split(delim).map(h => h.trim());
   const rows = lines.slice(1).map(l => {
-    const vals = l.split(delimiter).map(v => v.replace(/^"(.*)"$/, "$1").trim());
-    const o = {};
-    headers.forEach((h, i) => (o[h] = vals[i]));
-    return o;
+    const vals = l.split(delim);
+    const obj = {};
+    columns.forEach((h, i) => (obj[h] = vals[i] ?? ""));
+    return obj;
   });
-  return { columns: headers, rows };
+  return { columns, rows };
 }
 
-// ======================= GPT-5 Universal =======================
-async function askGPT(systemPrompt, userPrompt) {
-  const resp = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      reasoning: { effort: "medium" },
-      max_output_tokens: 1500,
-      input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ]
-    })
-  });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error?.message || resp.statusText);
-  return data.output_text || "";
+async function readText(name) {
+  try {
+    return await fs.readFile(path.join(STORAGE_DIR, name), "utf8");
+  } catch {
+    return "";
+  }
 }
 
-// ======================= API /api/ask =======================
+// ====== /api/ping ======
+app.get("/api/ping", (req, res) => {
+  res.json({ ok: true, model: "gpt-5", region: process.env.FLY_REGION || "?" });
+});
+
+// ====== /api/ask ======
 app.get("/api/ask", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     if (!q) return res.status(400).json({ ok: false, error: "missing_q" });
 
-    // Lee CSV y TXT
+    // Lee datos
     const { columns, rows } = await loadCSV("decimo.csv");
-    if (!rows.length) return res.json({ ok: true, general: "No hay datos en decimo.csv.", lists: [], tables: [] });
+    if (!rows.length)
+      return res.json({
+        ok: true,
+        general: "No hay datos en decimo.csv.",
+        lists: [],
+        tables: []
+      });
+
     const emocionales = await readText("emocionales.txt");
     const evaluacion = await readText("evaluacion.txt");
     const ubicacion = await readText("ubicacion.txt");
 
-    // Prepara contexto resumido
-    const numericCols = columns.filter(c => rows.some(r => Number.isFinite(toNum(r[c]))));
-    const safeRows = rows.slice(0, 300); // máximo 300 filas para demo
+    // Contexto de datos
+    const numericCols = columns.filter(c =>
+      rows.some(r => Number.isFinite(toNum(r[c])))
+    );
+    const safeRows = rows.slice(0, 300);
 
     const context = {
       csv: { columnas: columns, numericas: numericCols, filas: safeRows },
       txt: {
-        emocionales: emocionales.slice(0, 2000),
+        emocionales: emocionales.slice(0, 3000),
         evaluacion: evaluacion.slice(0, 2000),
         ubicacion: ubicacion.slice(0, 2000)
       }
     };
 
     const systemPrompt = `
-Eres el Asistente Lexium, especializado en análisis educativo.
-Tienes acceso a un CSV con datos de estudiantes y a varios TXT con definiciones y observaciones.
-Responde SIEMPRE en español y SOLO con este formato JSON exacto:
+Eres el asistente Lexium (modo demo).
+Responde **solo en formato JSON** con esta estructura exacta:
 {
-  "ok": true,
-  "general": "texto breve de respuesta",
-  "lists": [ { "title": "título", "items": ["", ""] } ],
-  "tables": [ { "title": "título", "columns": ["", ""], "rows": [["",""]] } ]
+ "ok": true,
+ "general": "texto principal",
+ "lists": [ { "title": "", "items": [""] } ],
+ "tables": [ { "title": "", "columns": ["",""], "rows": [["",""]] } ]
 }
-Reglas:
-- Usa los datos del CSV para cálculos (promedios, rankings, percentiles, comparaciones, filtros).
-- Usa los TXT para análisis, interpretación o definiciones.
-- No inventes datos que no existan.
-- Si la pregunta es de un alumno (ej: "reporte de X"), genera una tabla y descripción.
-- Lenguaje: formal, claro, respetuoso, sin diagnóstico clínico.
+Usa exclusivamente la información de los archivos CSV y TXT provistos.
+NO inventes datos. Describe y razona solo con base en el contexto.
+Si hay nombres parecidos, sugiere alternativas en "lists".
+Todo en español. Sin texto fuera del JSON.
 `;
 
     const userPrompt = `
-Pregunta del usuario:
-${q}
-
+Pregunta del usuario: ${q}
 Datos disponibles:
 ${JSON.stringify(context, null, 2)}
-
-Debes responder SOLO con JSON válido, siguiendo el formato especificado.
 `;
 
-    const out = await askGPT(systemPrompt, userPrompt);
+    const r = await fetch(OPENAI_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      })
+    });
 
-    let parsed;
-    try { parsed = JSON.parse(out); }
-    catch {
-      const m = out.match(/\{[\s\S]*\}/);
-      parsed = m ? JSON.parse(m[0]) : null;
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`OpenAI error ${r.status}: ${txt}`);
     }
-    if (!parsed) throw new Error("La respuesta de GPT-5 no fue JSON válido.");
+
+    const data = await r.json();
+    const content = data?.choices?.[0]?.message?.content || "";
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      const m = content.match(/\{[\s\S]*\}$/);
+      if (m) parsed = JSON.parse(m[0]);
+    }
+
+    if (!parsed)
+      return res.json({
+        ok: true,
+        general:
+          "No se pudo interpretar la respuesta del modelo. Reformula tu pregunta.",
+        lists: [],
+        tables: []
+      });
 
     res.json(parsed);
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ======================= Rutas auxiliares =======================
-app.get("/api/ping", (req, res) => {
-  res.json({ ok: true, model: OPENAI_MODEL, region: process.env.FLY_REGION || "?" });
-});
-
-// ======================= Inicia =======================
-app.listen(PORT, () => console.log(`✅ Lexium API (GPT-5) en puerto ${PORT}`));
+// ====== START ======
+app.listen(PORT, () =>
+  console.log(`✅ Lexium API lista en puerto ${PORT} (GPT-5)`)
+);
