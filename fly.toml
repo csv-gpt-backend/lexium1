@@ -5,3 +5,9 @@ app = "lexium-api-marcelo-20251003x"
   force_https = true
   auto_start_machines = true
   min_machines_running = 1
+
+# 👉 Declara el volumen que monta /app/storage
+#    (coincide con tu STORAGE_DIR y con el nombre de volumen "data_vol")
+[[mounts]]
+  source = "data_vol"
+  destination = "/app/storage"
