@@ -28,6 +28,14 @@ jobs:
         env:
           DOCKER_BUILDKIT: 1
 
+      # 👉 Crea el volumen si no existe (en la región GRU, ajusta si usas otra)
+      - name: Ensure volume
+        run: |
+          flyctl volumes create data_vol --region gru --size 1 -a lexium-api-marcelo-20251003x --yes || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Deploy usando la imagen ya construida (sin depot builder)
       - name: Deploy to Fly with prebuilt image
         run: |
           IMAGE="registry.fly.io/lexium-api-marcelo-20251003x:${{ github.sha }}"
