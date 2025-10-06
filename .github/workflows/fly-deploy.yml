@@ -10,20 +10,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # flyctl para el deploy final
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # Habilitamos buildx (Docker) para construir la imagen en GitHub
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login al registry de Fly con tu token
       - name: Login to Fly Registry
         run: echo "${{ secrets.FLY_API_TOKEN }}" | docker login registry.fly.io -u x --password-stdin
 
-      # Build & push de la imagen a registry.fly.io/<app>:<sha>
       - name: Build and Push Image
         run: |
+          IMAGE="registry.fly.io/lexium-api-marcelo-20251003x:${{ github.sha }}"
+          docker buildx build --platform linux/amd64 -t "$IMAGE" --push .
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Deploy to Fly with prebuilt image
+        run: |
+          IMAGE="registry.fly.io/lexium-api-marcelo-20251003x:${{ github.sha }}"
+          flyctl deploy -a lexium-api-marcelo-20251003x -i "$IMAGE" --strategy immediate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Check status & recent logs
+        run: |
+          flyctl status -a lexium-api-marcelo-20251003x || true
+          flyctl logs   -a lexium-api-marcelo-20251003x --since 5m || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
